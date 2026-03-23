@@ -1,0 +1,105 @@
+{
+  "total_tests": 16,
+  "passed_tests": 16,
+  "failed_tests": 0,
+  "success_rate": 100.0,
+  "test_results": [
+    {
+      "name": "Login with administrador",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:09.869309"
+    },
+    {
+      "name": "Health check endpoint",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:09.977841"
+    },
+    {
+      "name": "Create EPI with NBR field only",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:10.228676"
+    },
+    {
+      "name": "NBR field correctly stored and returned",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:10.228689"
+    },
+    {
+      "name": "Create EPI with both CA and NBR",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:10.391698"
+    },
+    {
+      "name": "Reject EPI without CA or NBR",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:10.547465"
+    },
+    {
+      "name": "Set EPI replacement period to weekly",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:10.660116"
+    },
+    {
+      "name": "Set EPI custom replacement period (45 days)",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:10.798303"
+    },
+    {
+      "name": "Create mandatory kit with sector",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:11.012025"
+    },
+    {
+      "name": "Reject kit without sector",
+      "success": true,
+      "details": "Properly rejected",
+      "timestamp": "2026-03-23T16:54:11.380733"
+    },
+    {
+      "name": "Get all alerts endpoint",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:11.506636"
+    },
+    {
+      "name": "Get pending EPIs alerts",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:11.648307"
+    },
+    {
+      "name": "Get replacement due alerts",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:11.804038"
+    },
+    {
+      "name": "Dashboard includes alert statistics",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:11.920945"
+    },
+    {
+      "name": "Get employee-specific alerts",
+      "success": true,
+      "details": "",
+      "timestamp": "2026-03-23T16:54:12.151793"
+    },
+    {
+      "name": "Delivery history shows responsible person",
+      "success": true,
+      "details": "No deliveries to test (acceptable)",
+      "timestamp": "2026-03-23T16:54:12.263492"
+    }
+  ],
+  "timestamp": "2026-03-23T16:54:12.263515"
+}
