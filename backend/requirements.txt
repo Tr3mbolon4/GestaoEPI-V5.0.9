@@ -43,6 +43,7 @@ httplib2==0.31.2
 httpx==0.28.1
 huggingface_hub==1.5.0
 idna==3.11
+insightface==0.7.3
 importlib_metadata==8.7.1
 iniconfig==2.3.0
 isort==8.0.0
@@ -63,6 +64,7 @@ multidict==6.7.1
 mypy==1.19.1
 mypy_extensions==1.1.0
 numpy==2.4.2
+onnxruntime==1.23.2
 oauthlib==3.3.1
 openai==1.99.9
 openpyxl==3.1.5

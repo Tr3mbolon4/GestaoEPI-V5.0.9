@@ -15,18 +15,143 @@ import { getUploadUrl, logImageError } from '@/utils/imageUtils';
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
+const LIVE_DETECTION_CONFIDENCE = 0.52;
+const FACIAL_AUTO_APPROVE_THRESHOLD = 0.85;
+const FACIAL_REVIEW_THRESHOLD = 0.70;
+const LIVE_STABILITY_TIME = 350;
+const LIVE_MAX_AUTO_ATTEMPTS = 5;
+const LIVE_DETECTION_INTERVAL = 150;
+const DETECTION_GRACE_MS = 700;
+const STABILITY_TIMER_DELAY = 80;
+const FRAME_BURST_COUNT = 5;
+const FRAME_BURST_DELAY = 60;
+const CENTER_TOLERANCE_X = 0.30;
+const CENTER_TOLERANCE_Y = 0.34;
+const MIN_FACE_AREA_RATIO = 0.025;
+const TARGET_FACE_AREA_RATIO = 0.16;
+const MOTION_TOLERANCE_RATIO = 0.08;
+
+const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const loadImageFromDataUrl = (imageSrc) =>
+  new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = imageSrc;
+  });
+
+const getFaceGeometry = (box, width, height) => {
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+  const faceAreaRatio = (box.width * box.height) / (width * height);
+  const offsetX = Math.abs(centerX - width / 2) / width;
+  const offsetY = Math.abs(centerY - height / 2) / height;
+
+  return {
+    centerX,
+    centerY,
+    faceAreaRatio,
+    offsetX,
+    offsetY
+  };
+};
+
+const computeImageMetrics = (img) => {
+  const canvas = document.createElement('canvas');
+  const maxWidth = 160;
+  const scale = Math.min(1, maxWidth / img.width);
+  canvas.width = Math.max(32, Math.round(img.width * scale));
+  canvas.height = Math.max(24, Math.round(img.height * scale));
+
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  let brightnessSum = 0;
+  let detailSum = 0;
+  let samples = 0;
+
+  for (let y = 0; y < height - 1; y += 1) {
+    for (let x = 0; x < width - 1; x += 1) {
+      const idx = (y * width + x) * 4;
+      const rightIdx = (y * width + (x + 1)) * 4;
+      const bottomIdx = ((y + 1) * width + x) * 4;
+
+      const gray = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      const rightGray = 0.299 * data[rightIdx] + 0.587 * data[rightIdx + 1] + 0.114 * data[rightIdx + 2];
+      const bottomGray = 0.299 * data[bottomIdx] + 0.587 * data[bottomIdx + 1] + 0.114 * data[bottomIdx + 2];
+
+      brightnessSum += gray;
+      detailSum += Math.abs(gray - rightGray) + Math.abs(gray - bottomGray);
+      samples += 1;
+    }
+  }
+
+  const brightness = samples > 0 ? brightnessSum / (samples * 255) : 0;
+  const sharpness = samples > 0 ? detailSum / (samples * 2) : 0;
+
+  return {
+    brightness,
+    sharpness
+  };
+};
+
+const scoreFrameQuality = (img, detection) => {
+  const box = detection?.detection?.box || detection?.box;
+  const geometry = getFaceGeometry(box, img.width, img.height);
+  const { brightness, sharpness } = computeImageMetrics(img);
+
+  const detectionScore = detection?.detection?.score || detection?.score || 0;
+  const centerDistance = Math.sqrt((geometry.offsetX * 2) ** 2 + (geometry.offsetY * 2) ** 2);
+  const centerScore = clamp(1 - centerDistance / 0.9);
+  const sizeScore = clamp(1 - Math.abs(geometry.faceAreaRatio - TARGET_FACE_AREA_RATIO) / TARGET_FACE_AREA_RATIO);
+  const lightingScore = clamp(1 - Math.abs(brightness - 0.55) / 0.35);
+  const sharpnessScore = clamp((sharpness - 8) / 28);
+
+  const totalScore =
+    (detectionScore * 0.35) +
+    (centerScore * 0.20) +
+    (sizeScore * 0.15) +
+    (sharpnessScore * 0.15) +
+    (lightingScore * 0.15);
+
+  return {
+    totalScore,
+    detectionScore,
+    centerScore,
+    sizeScore,
+    sharpnessScore,
+    lightingScore,
+    faceAreaRatio: geometry.faceAreaRatio
+  };
+};
+
+const FAST_DETECTION_OPTIONS = new faceapi.TinyFaceDetectorOptions({
+  inputSize: 128,
+  scoreThreshold: 0.45
+});
+
+const RECOGNITION_EMBEDDING_OPTIONS = new faceapi.TinyFaceDetectorOptions({
+  inputSize: 224,
+  scoreThreshold: 0.50
+});
+
 // ============================================
 // CONFIGURAÇÕES OTIMIZADAS PARA PCs FRACOS
 // ============================================
 
 // Detector LEVE para detecção contínua (MUITO RÁPIDO)
-const DETECTION_OPTIONS = new faceapi.TinyFaceDetectorOptions({
+const LEGACY_DETECTION_OPTIONS = new faceapi.TinyFaceDetectorOptions({
   inputSize: 128,        // 128 = ULTRA LEVE para detecção contínua
   scoreThreshold: 0.55   // Confiança mínima equilibrada
 });
 
 // Configurações para embedding final (só roda 1x após validação)
-const EMBEDDING_OPTIONS = new faceapi.TinyFaceDetectorOptions({
+const LEGACY_EMBEDDING_OPTIONS = new faceapi.TinyFaceDetectorOptions({
   inputSize: 224,        // Reduzido de 320 para melhor performance
   scoreThreshold: 0.6
 });
@@ -61,6 +186,10 @@ export default function EntregaEPI() {
   const [notFoundMessage, setNotFoundMessage] = useState(null);
   const [autoAttempts, setAutoAttempts] = useState(0);
   const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(true);
+  const [runtimeBackend, setRuntimeBackend] = useState('AUTO');
+  const [similarityScore, setSimilarityScore] = useState(0);
+  const [similarityMessage, setSimilarityMessage] = useState('Aguardando validacao facial');
+  const [cameraFacingMode, setCameraFacingMode] = useState('user');
   
   // Estados para detecção em tempo real
   const [faceDetected, setFaceDetected] = useState(false);
@@ -87,6 +216,12 @@ export default function EntregaEPI() {
   const processingRef = useRef(false);  // LOCK DE PROCESSAMENTO
   const lastValidDetectionRef = useRef(null);
   const autoAttemptsRef = useRef(0);
+  const detectionStateRef = useRef({
+    lastAcceptedAt: 0,
+    stableSince: null,
+    lastBox: null
+  });
+  const pendingConfirmationRef = useRef(null);
 
   useEffect(() => {
     // Carregar tudo em paralelo
@@ -119,20 +254,52 @@ export default function EntregaEPI() {
   // Carregar templates quando modelos forem carregados
   useEffect(() => {
     if (modelsLoaded && !templatesLoaded) {
-      loadAllFacialTemplates();
+      setTemplatesLoaded(true);
     }
   }, [modelsLoaded, templatesLoaded]);
+
+  const configureTensorflowBackend = async () => {
+    try {
+      const tf = faceapi.tf;
+      if (!tf) {
+        setRuntimeBackend('AUTO');
+        return;
+      }
+
+      if (typeof tf.enableProdMode === 'function') {
+        tf.enableProdMode();
+      }
+
+      const preferredBackends = ['webgl', 'wasm', 'cpu'];
+      for (const backend of preferredBackends) {
+        try {
+          const changed = await tf.setBackend(backend);
+          if (changed !== false) {
+            break;
+          }
+        } catch (backendError) {
+          console.warn(`Backend ${backend} indisponivel:`, backendError?.message || backendError);
+        }
+      }
+
+      if (typeof tf.ready === 'function') {
+        await tf.ready();
+      }
+
+      setRuntimeBackend((tf.getBackend?.() || 'AUTO').toUpperCase());
+    } catch (error) {
+      console.warn('Nao foi possivel configurar backend do TensorFlow.js:', error);
+      setRuntimeBackend('AUTO');
+    }
+  };
 
   const loadFaceModels = async () => {
     try {
       setLoadingStatus('Carregando IA de reconhecimento...');
       setLoadingProgress(10);
+      await configureTensorflowBackend();
       const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
-      await Promise.all([
-        faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-        faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-        faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
-      ]);
+      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
       setModelsLoaded(true);
       setLoadingProgress(40);
       setLoadingStatus('');
@@ -145,49 +312,20 @@ export default function EntregaEPI() {
   // OTIMIZADO: Buscar templates apenas de colaboradores ativos
   const loadAllFacialTemplates = useCallback(async () => {
     try {
-      setLoadingStatus('Carregando base facial...');
-      setLoadingProgress(50);
-      
-      const res = await axios.get(`${API}/facial-templates/all`, { headers: getAuthHeader() });
-      
+      setLoadingStatus('Preparando camera...');
       setLoadingProgress(80);
-      
-      const templatesWithEmployees = [];
-      for (const item of res.data) {
-        try {
-          // Filtrar apenas colaboradores ativos (preparado para filtro futuro)
-          if (item.employee?.status === 'inactive') continue;
-          
-          const descriptor = new Float32Array(JSON.parse(item.descriptor));
-          templatesWithEmployees.push({
-            employee: item.employee,
-            descriptor,
-            templateId: item.id,
-            // Campos para filtro futuro
-            sector: item.employee?.department,
-            company: item.employee?.company_id
-          });
-        } catch (e) {
-          console.error('Erro ao parsear descriptor:', e);
-        }
-      }
-      
-      setFacialTemplatesCache(templatesWithEmployees);
-      setTemplateCount(templatesWithEmployees.length);
+      setFacialTemplatesCache([]);
+      setTemplateCount(allEmployees.length || 0);
       setTemplatesLoaded(true);
       setLoadingProgress(100);
       setLoadingStatus('');
-      
-      if (templatesWithEmployees.length > 0) {
-        console.log(`${templatesWithEmployees.length} templates faciais carregados`);
-      }
     } catch (error) {
       console.error('Erro ao carregar templates:', error);
       setLoadingStatus('');
       setLoadingProgress(100);
       setTemplatesLoaded(true);
     }
-  }, []);
+  }, [allEmployees.length]);
 
   // ========================================
   // DETECÇÃO EM TEMPO REAL (OTIMIZADA)
@@ -208,8 +346,8 @@ export default function EntregaEPI() {
     
     // Detecção a cada 350ms (otimizado para PCs fracos)
     detectionIntervalRef.current = setInterval(async () => {
-      await detectFaceInRealTime();
-    }, DETECTION_INTERVAL);
+      await detectFaceInRealTimeV2();
+    }, LIVE_DETECTION_INTERVAL);
   };
 
   const stopContinuousDetection = () => {
@@ -234,6 +372,386 @@ export default function EntregaEPI() {
   };
 
   // Detecção LEVE - SÓ detecta rosto, NÃO gera embedding
+  const resetDetectionStateV2 = useCallback(() => {
+    setFaceValid(false);
+    setStabilityProgress(0);
+    setDetectionScore(0);
+    lastValidDetectionRef.current = null;
+    detectionStateRef.current = {
+      lastAcceptedAt: 0,
+      stableSince: null,
+      lastBox: null
+    };
+    if (stabilityTimerRef.current) {
+      clearTimeout(stabilityTimerRef.current);
+      stabilityTimerRef.current = null;
+    }
+  }, []);
+
+  const isMovementTolerable = useCallback((previousBox, currentBox, videoWidth, videoHeight) => {
+    if (!previousBox || !currentBox) return false;
+
+    const previousCenterX = previousBox.x + previousBox.width / 2;
+    const previousCenterY = previousBox.y + previousBox.height / 2;
+    const currentCenterX = currentBox.x + currentBox.width / 2;
+    const currentCenterY = currentBox.y + currentBox.height / 2;
+
+    const centerDeltaX = Math.abs(currentCenterX - previousCenterX) / videoWidth;
+    const centerDeltaY = Math.abs(currentCenterY - previousCenterY) / videoHeight;
+    const widthDelta = Math.abs(currentBox.width - previousBox.width) / Math.max(previousBox.width, 1);
+    const heightDelta = Math.abs(currentBox.height - previousBox.height) / Math.max(previousBox.height, 1);
+
+    return (
+      centerDeltaX <= MOTION_TOLERANCE_RATIO &&
+      centerDeltaY <= MOTION_TOLERANCE_RATIO &&
+      widthDelta <= 0.18 &&
+      heightDelta <= 0.18
+    );
+  }, []);
+
+  const resolveEmployeeById = useCallback(async (employeeId) => {
+    const cachedEmployee = allEmployees.find((employee) => employee.id === employeeId);
+    if (cachedEmployee) {
+      return cachedEmployee;
+    }
+
+    const response = await axios.get(`${API}/employees/${employeeId}`, { headers: getAuthHeader() });
+    return response.data;
+  }, [allEmployees]);
+
+  const finalizeSuccessfulMatch = useCallback(async (employee, bestFrame, identifyResult, extra = {}) => {
+    const finalPercent = Math.round((identifyResult?.similarity_score || 0) * 100);
+    setCapturedPhoto(bestFrame.imageSrc);
+    setSimilarityScore(finalPercent);
+    setSimilarityMessage(identifyResult?.message || `Similaridade aprovada: ${finalPercent}%`);
+    setFacialMatch({
+      score: identifyResult?.similarity_score || 0,
+      verified: true,
+      status: identifyResult?.status || 'approved',
+      message: identifyResult?.message || '',
+      detectionConfidence: identifyResult?.detection_confidence || bestFrame.quality.detectionScore,
+      frameQuality: bestFrame.quality.totalScore,
+      poseLabel: identifyResult?.matched_pose_label || 'frontal',
+      secondCaptureUsed: Boolean(extra.secondCaptureUsed),
+      livenessStatus: extra.livenessStatus || (extra.secondCaptureUsed ? 'approved' : 'not_required')
+    });
+    setSelectedEmployee(employee);
+    pendingConfirmationRef.current = null;
+    await fetchEmployeeHistory(employee.id);
+
+    autoAttemptsRef.current = 0;
+    setAutoAttempts(0);
+    setAutoCaptureEnabled(true);
+    setLoadingStatus('');
+    setLoading(false);
+    setIsProcessingEmbedding(false);
+
+    toast.success(`${employee.full_name} identificado com ${finalPercent}%`);
+
+    await wait(150);
+    setShowWebcam(false);
+    setStep('delivery');
+  }, []);
+
+  const captureBestFrameBurst = useCallback(async () => {
+    const frames = [];
+
+    for (let index = 0; index < FRAME_BURST_COUNT; index += 1) {
+      const imageSrc = webcamRef.current?.getScreenshot();
+      if (!imageSrc) {
+        await wait(FRAME_BURST_DELAY);
+        continue;
+      }
+
+      try {
+        const img = await loadImageFromDataUrl(imageSrc);
+        const detection = await faceapi.detectSingleFace(img, RECOGNITION_EMBEDDING_OPTIONS);
+
+        if (detection?.box) {
+          const quality = scoreFrameQuality(img, detection);
+          frames.push({
+            imageSrc,
+            detection,
+            quality
+          });
+        }
+      } catch (error) {
+        console.warn('Frame ignorado durante burst:', error?.message || error);
+      }
+
+      if (index < FRAME_BURST_COUNT - 1) {
+        await wait(FRAME_BURST_DELAY);
+      }
+    }
+
+    if (frames.length === 0) {
+      return null;
+    }
+
+    return frames.sort((left, right) => right.quality.totalScore - left.quality.totalScore)[0];
+  }, []);
+
+  const resetAfterProcessV2 = useCallback((wasAutoCapture = false, options = {}) => {
+    setIsProcessingEmbedding(false);
+    setLoading(false);
+    setLoadingStatus('');
+    resetDetectionStateV2();
+
+    if (!options.preservePendingConfirmation) {
+      pendingConfirmationRef.current = null;
+    }
+
+    const restartDelay = options.restartDelay ?? 500;
+
+    if (wasAutoCapture && autoAttemptsRef.current >= LIVE_MAX_AUTO_ATTEMPTS && !options.forceRestart) {
+      setTimeout(() => {
+        if (showWebcam) startContinuousDetection();
+      }, 1200);
+      return;
+    }
+
+    setTimeout(() => {
+      if (showWebcam) startContinuousDetection();
+    }, restartDelay);
+  }, [resetDetectionStateV2, showWebcam]);
+
+  const captureAndIdentifyV2 = useCallback(async (isAutoCapture = false) => {
+    if (processingRef.current || isProcessingEmbedding || !webcamRef.current) {
+      return;
+    }
+
+    processingRef.current = true;
+    stopContinuousDetection();
+    await wait(120);
+
+    setIsProcessingEmbedding(true);
+    setLoading(true);
+    setLoadingStatus('Capturando melhor frame...');
+
+    try {
+      const bestFrame = await captureBestFrameBurst();
+      if (!bestFrame) {
+        toast.error('Nao foi possivel capturar um rosto valido. Tente novamente.');
+        resetAfterProcessV2(isAutoCapture);
+        return;
+      }
+
+      setLoadingStatus('Enviando imagem para reconhecimento...');
+      const identifyResponse = await axios.post(
+        `${API}/facial/identify-fast`,
+        { image_base64: bestFrame.imageSrc },
+        { headers: getAuthHeader() }
+      );
+      const identifyResult = identifyResponse.data;
+      const percentMatch = Math.round((identifyResult?.similarity_score || 0) * 100);
+
+      if (identifyResult.status === 'approved' && identifyResult.employee_id) {
+        const employee = await resolveEmployeeById(identifyResult.employee_id);
+        await finalizeSuccessfulMatch(employee, bestFrame, identifyResult, {
+          secondCaptureUsed: Boolean(pendingConfirmationRef.current)
+        });
+        return;
+      }
+
+      if (identifyResult.status === 'retry' && identifyResult.employee_id) {
+        const pending = pendingConfirmationRef.current;
+
+        if (pending?.employeeId === identifyResult.employee_id && pending?.frameImageSrc) {
+          setLoadingStatus('Validando segunda captura...');
+          const livenessResponse = await axios.post(
+            `${API}/facial/liveness-check`,
+            {
+              image_base64: bestFrame.imageSrc,
+              previous_image_base64: pending.frameImageSrc
+            },
+            { headers: getAuthHeader() }
+          );
+          const livenessResult = livenessResponse.data;
+
+          if (livenessResult.passed) {
+            const employee = await resolveEmployeeById(identifyResult.employee_id);
+            await finalizeSuccessfulMatch(employee, bestFrame, identifyResult, {
+              secondCaptureUsed: true,
+              livenessStatus: livenessResult.status
+            });
+            return;
+          }
+
+          setSimilarityScore(percentMatch);
+          setSimilarityMessage(livenessResult.message || identifyResult.message);
+          setNotFoundMessage({
+            message: livenessResult.message || 'Segunda captura nao confirmou a identidade',
+            bestScore: percentMatch,
+            threshold: Math.round(FACIAL_REVIEW_THRESHOLD * 100)
+          });
+          toast.warning(livenessResult.message || 'Segunda captura nao confirmou a identidade');
+          resetAfterProcessV2(isAutoCapture);
+          return;
+        }
+
+        pendingConfirmationRef.current = {
+          employeeId: identifyResult.employee_id,
+          similarityScore: identifyResult.similarity_score,
+          frameImageSrc: bestFrame.imageSrc
+        };
+        setSimilarityScore(percentMatch);
+        setSimilarityMessage(identifyResult.message || `Faixa de confirmacao: ${percentMatch}%`);
+        setNotFoundMessage(null);
+        toast.warning(identifyResult.message || 'Capturando novamente para confirmar a identidade');
+        resetAfterProcessV2(true, {
+          preservePendingConfirmation: true,
+          restartDelay: 200,
+          forceRestart: true
+        });
+        return;
+      }
+
+      pendingConfirmationRef.current = null;
+      setSimilarityScore(percentMatch);
+      setSimilarityMessage(identifyResult.message || `Similaridade insuficiente: ${percentMatch}%`);
+      setNotFoundMessage({
+        message: identifyResult.message || 'Reconhecimento bloqueado por baixa similaridade',
+        bestScore: percentMatch,
+        threshold: Math.round(FACIAL_REVIEW_THRESHOLD * 100)
+      });
+      if (isAutoCapture && autoAttemptsRef.current >= LIVE_MAX_AUTO_ATTEMPTS) {
+        setAutoCaptureEnabled(false);
+      }
+      toast.error(identifyResult.message || 'Reconhecimento bloqueado');
+      resetAfterProcessV2(isAutoCapture);
+    } catch (error) {
+      console.error('Erro na identificacao facial:', error);
+      toast.error(error.response?.data?.detail || 'Erro ao processar reconhecimento facial');
+      resetAfterProcessV2(isAutoCapture);
+    } finally {
+      processingRef.current = false;
+    }
+  }, [
+    captureBestFrameBurst,
+    finalizeSuccessfulMatch,
+    isProcessingEmbedding,
+    resetAfterProcessV2,
+    resolveEmployeeById
+  ]);
+
+  const scheduleAutoCaptureV2 = useCallback(() => {
+    if (
+      stabilityTimerRef.current ||
+      processingRef.current ||
+      !autoCaptureEnabled ||
+      autoAttemptsRef.current >= LIVE_MAX_AUTO_ATTEMPTS
+    ) {
+      return;
+    }
+
+    stabilityTimerRef.current = setTimeout(() => {
+      stabilityTimerRef.current = null;
+      if (!processingRef.current && autoAttemptsRef.current < LIVE_MAX_AUTO_ATTEMPTS) {
+        autoAttemptsRef.current += 1;
+        setAutoAttempts(autoAttemptsRef.current);
+        captureAndIdentifyV2(true);
+      }
+    }, STABILITY_TIMER_DELAY);
+  }, [autoCaptureEnabled, captureAndIdentifyV2]);
+
+  const detectFaceInRealTimeV2 = useCallback(async () => {
+    if (processingRef.current || loading || isProcessingEmbedding) return;
+
+    if (!isVideoReady()) {
+      setGuidanceMessage('Aguardando camera...');
+      return;
+    }
+
+    const video = webcamRef.current.video;
+
+    try {
+      const detection = await faceapi.detectSingleFace(video, FAST_DETECTION_OPTIONS);
+      const now = Date.now();
+
+      if (!detection || processingRef.current) {
+        const recentlyAccepted = now - detectionStateRef.current.lastAcceptedAt <= DETECTION_GRACE_MS;
+        if (!recentlyAccepted) {
+          setFaceDetected(false);
+          setGuidanceMessage('Posicione o rosto no centro da camera');
+          resetDetectionStateV2();
+        } else {
+          setGuidanceMessage('Pequeno movimento detectado, mantendo tentativa');
+        }
+        return;
+      }
+
+      const box = detection.box;
+      if (!box || box.width <= 0 || box.height <= 0 || Number.isNaN(box.x) || Number.isNaN(box.y)) {
+        return;
+      }
+
+      setFaceDetected(true);
+      setDetectionScore(Math.round(detection.score * 100));
+
+      const geometry = getFaceGeometry(box, video.videoWidth, video.videoHeight);
+      const isCentered = geometry.offsetX <= CENTER_TOLERANCE_X && geometry.offsetY <= CENTER_TOLERANCE_Y;
+      const isBigEnough = geometry.faceAreaRatio >= MIN_FACE_AREA_RATIO;
+      const qualityOk = detection.score >= LIVE_DETECTION_CONFIDENCE;
+      const movementOk = isMovementTolerable(detectionStateRef.current.lastBox, box, video.videoWidth, video.videoHeight);
+      const isValid = (qualityOk && isCentered && isBigEnough) || (movementOk && qualityOk);
+
+      if (!isCentered) {
+        setGuidanceMessage('Centralize o rosto na area marcada');
+      } else if (!isBigEnough) {
+        setGuidanceMessage('Aproxime-se da camera');
+      } else if (!qualityOk) {
+        setGuidanceMessage('Melhore a iluminacao do ambiente');
+      } else if (pendingConfirmationRef.current) {
+        setGuidanceMessage('Confirmando identidade com nova captura automatica');
+      } else {
+        setGuidanceMessage('Mantenha o rosto estavel');
+      }
+
+      if (!isValid) {
+        const recentlyAccepted = now - detectionStateRef.current.lastAcceptedAt <= DETECTION_GRACE_MS;
+        if (!recentlyAccepted) {
+          setFaceValid(false);
+          setStabilityProgress(0);
+          detectionStateRef.current.stableSince = null;
+        }
+        return;
+      }
+
+      detectionStateRef.current.lastAcceptedAt = now;
+      detectionStateRef.current.lastBox = box;
+      if (!detectionStateRef.current.stableSince) {
+        detectionStateRef.current.stableSince = now;
+      }
+
+      lastValidDetectionRef.current = now;
+      setFaceValid(true);
+
+      const stableTime = now - detectionStateRef.current.stableSince;
+      const progress = Math.min(100, (stableTime / LIVE_STABILITY_TIME) * 100);
+      setStabilityProgress(progress);
+
+      if (stableTime >= LIVE_STABILITY_TIME) {
+        scheduleAutoCaptureV2();
+      }
+    } catch (error) {
+      console.warn('Erro na deteccao em tempo real:', error?.message || error);
+    }
+  }, [
+    isMovementTolerable,
+    isProcessingEmbedding,
+    loading,
+    resetDetectionStateV2,
+    scheduleAutoCaptureV2
+  ]);
+
+  const searchByFaceV2 = useCallback(async () => {
+    if (loading || isProcessingEmbedding) return;
+    setNotFoundMessage(null);
+    setAutoCaptureEnabled(true);
+    setSimilarityMessage('Captura manual em andamento');
+    await captureAndIdentifyV2(false);
+  }, [captureAndIdentifyV2, isProcessingEmbedding, loading]);
+
   const detectFaceInRealTime = async () => {
     // LOCK: NÃO executar se estiver processando
     if (processingRef.current || loading || isProcessingEmbedding) return;
@@ -694,6 +1212,10 @@ export default function EntregaEPI() {
           is_return: deliveryType === 'return',
           facial_match_score: facialMatch?.score,
           facial_photo_path: photoPath,
+          facial_validation_status: facialMatch?.status || 'approved',
+          facial_validation_message: facialMatch?.message || similarityMessage,
+          facial_liveness_status: facialMatch?.livenessStatus || 'not_required',
+          facial_second_capture_used: Boolean(facialMatch?.secondCaptureUsed),
           items: selectedItems
         },
         { headers: getAuthHeader() }
@@ -716,6 +1238,7 @@ export default function EntregaEPI() {
 
   const resetForm = () => {
     stopContinuousDetection();
+    resetDetectionStateV2();
     
     setStep('facial');
     setSelectedEmployee(null);
@@ -726,7 +1249,10 @@ export default function EntregaEPI() {
     setCapturedPhoto(null);
     setNotFoundMessage(null);
     setShowWebcam(true);
-    setConsentAccepted(false);
+    setCameraFacingMode('user');
+    setSimilarityScore(0);
+    setSimilarityMessage('Aguardando validacao facial');
+    pendingConfirmationRef.current = null;
     autoAttemptsRef.current = 0;
     setAutoAttempts(0);
     setAutoCaptureEnabled(true);
@@ -879,7 +1405,8 @@ export default function EntregaEPI() {
               <div 
                 className="relative mx-auto bg-slate-900 rounded-xl overflow-hidden"
                 style={{ 
-                  maxWidth: '640px', 
+                  maxWidth: '640px',
+                  width: '100%',
                   aspectRatio: '4/3'
                 }}
               >
@@ -887,17 +1414,18 @@ export default function EntregaEPI() {
                   ref={webcamRef}
                   audio={false}
                   screenshotFormat="image/jpeg"
-                  screenshotQuality={0.8}
+                  screenshotQuality={0.92}
+                  forceScreenshotSourceSize={true}
                   className={`absolute inset-0 w-full h-full object-cover rounded-lg border-4 transition-colors duration-300 ${
                     faceValid ? 'border-emerald-400' : faceDetected ? 'border-amber-400' : 'border-blue-300'
                   }`}
                   videoConstraints={{
-                    facingMode: "user",
-                    width: { ideal: 640, max: 640 },
-                    height: { ideal: 480, max: 480 },
-                    frameRate: { ideal: 15, max: 20 }
+                    facingMode: { ideal: cameraFacingMode },
+                    width: { ideal: 960 },
+                    height: { ideal: 720 },
+                    frameRate: { ideal: 18, max: 24 }
                   }}
-                  mirrored={true}
+                  mirrored={cameraFacingMode === 'user'}
                 />
                 
                 {/* Guia de posicionamento */}
@@ -921,6 +1449,21 @@ export default function EntregaEPI() {
                     <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
                     <span className="font-medium text-slate-700">{loadingStatus}</span>
                   </div>
+                </div>
+              </div>
+
+              <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="flex-1"
+                  onClick={() => setCameraFacingMode((currentMode) => currentMode === 'user' ? 'environment' : 'user')}
+                >
+                  {cameraFacingMode === 'user' ? 'Usar Camera Traseira' : 'Usar Camera Frontal'}
+                </Button>
+                <div className="flex-1 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                  Backend facial: InsightFace/API
+                  <span className="ml-2 font-medium text-slate-800">Detector local: {runtimeBackend}</span>
                 </div>
               </div>
                   
@@ -953,8 +1496,8 @@ export default function EntregaEPI() {
               
               {/* Botão de identificação manual */}
               <button
-                onClick={searchByFace}
-                disabled={loading || facialTemplatesCache.length === 0}
+                onClick={searchByFaceV2}
+                disabled={loading || !modelsLoaded}
                 className={`w-full font-medium rounded-lg px-4 py-4 flex items-center justify-center gap-2 text-lg transition-all duration-300 ${
                   loading 
                     ? 'bg-slate-400 text-white cursor-not-allowed'
@@ -995,29 +1538,10 @@ export default function EntregaEPI() {
             <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
             <div className="text-sm text-amber-800 flex-1">
               <p className="font-medium">Colaborador não reconhecido?</p>
-              <p className="mb-3">Se o colaborador não for identificado, selecione manualmente:</p>
-              <select
-                onChange={async (e) => {
-                  if (!e.target.value) return;
-                  const employee = allEmployees.find(emp => emp.id === e.target.value);
-                  if (employee) {
-                    setSelectedEmployee(employee);
-                    await fetchEmployeeHistory(employee.id);
-                    setShowWebcam(false);
-                    setStep('delivery');
-                    toast.success(`${employee.full_name} selecionado manualmente`);
-                  }
-                }}
-                className="w-full p-2 rounded border border-amber-300 bg-white text-sm"
-                data-testid="manual-employee-select"
-              >
-                <option value="">Selecionar colaborador...</option>
-                {allEmployees.map((emp) => (
-                  <option key={emp.id} value={emp.id}>
-                    {emp.full_name} - {emp.cpf || emp.registration || 'Sem CPF'}
-                  </option>
-                ))}
-              </select>
+              <p className="mb-3">Se o colaborador nao for identificado, uma nova captura facial sera exigida.</p>
+              <div className="rounded border border-amber-300 bg-white p-3 text-sm">
+                Base operacional: {allEmployees.length} colaborador(es). Este fluxo nao permite selecao manual, cracha ou QR Code para validar o colaborador.
+              </div>
             </div>
           </div>
         </div>

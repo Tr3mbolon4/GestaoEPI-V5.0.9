@@ -28,6 +28,7 @@ from reportlab.lib.units import mm, cm
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from services.face_recognition_service import FaceRecognitionService
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 # Dias para expiração de senha
 PASSWORD_EXPIRY_DAYS = 30
+face_recognition_service = FaceRecognitionService()
 
 app = FastAPI(title='Cipolatti API')
 api_router = APIRouter(prefix='/api')
@@ -74,6 +76,8 @@ async def startup_event():
     await connect_db()
     from seed import seed_database
     await seed_database()
+    db = await get_db()
+    await face_recognition_service.initialize_cache(db)
 
 @app.on_event('shutdown')
 async def shutdown_event():
@@ -85,6 +89,19 @@ def doc_to_response(doc, id_field='id'):
     result = {k: v for k, v in doc.items() if k != '_id'}
     result[id_field] = str(doc['_id'])
     return result
+
+def format_facial_template_response(doc):
+    if doc is None:
+        return None
+    return {
+        "id": str(doc["_id"]),
+        "employee_id": str(doc.get("employee_id")) if doc.get("employee_id") else None,
+        "descriptor": doc.get("descriptor"),
+        "pose_label": doc.get("pose_label"),
+        "quality_score": doc.get("quality_score"),
+        "detection_score": doc.get("detection_score"),
+        "created_at": doc.get("created_at")
+    }
 
 def check_password_expired(user):
     """Verifica se a senha expirou (mais de 30 dias)"""
@@ -949,8 +966,10 @@ async def generate_employee_history_pdf(employee_id: str, current_user: dict = D
 @api_router.get('/employees/{employee_id}/facial-templates')
 async def get_facial_templates(employee_id: str, current_user: dict = Depends(get_current_user)):
     db = await get_db()
-    templates = await db.facial_templates.find({"employee_id": employee_id}).to_list(100)
-    return [doc_to_response(t) for t in templates]
+    templates = await db.facial_templates.find({
+        "employee_id": {"$in": [employee_id, ObjectId(employee_id)]}
+    }).to_list(100)
+    return [format_facial_template_response(t) for t in templates]
 
 # Endpoint otimizado para buscar TODOS os templates de uma vez
 @api_router.get('/facial-templates/all')
@@ -993,6 +1012,9 @@ async def get_all_facial_templates(current_user: dict = Depends(get_current_user
                 'id': str(t['_id']),
                 'employee_id': emp_id_str,
                 'descriptor': t.get('descriptor'),
+                'pose_label': t.get('pose_label'),
+                'quality_score': t.get('quality_score'),
+                'detection_score': t.get('detection_score'),
                 'employee': emp_map[emp_id_str]
             })
     
@@ -1219,15 +1241,22 @@ async def create_facial_template(employee_id: str, template_data: FacialTemplate
     new_template = {
         "employee_id": ObjectId(employee_id),
         "descriptor": template_data.descriptor,
+        "pose_label": template_data.pose_label,
+        "quality_score": template_data.quality_score,
+        "detection_score": template_data.detection_score,
         "created_at": datetime.now(timezone.utc)
     }
     result = await db.facial_templates.insert_one(new_template)
+    await face_recognition_service.refresh_employee_cache(db, employee_id)
     
     # Retornar resposta formatada corretamente
     return {
         "id": str(result.inserted_id),
         "employee_id": employee_id,
         "descriptor": template_data.descriptor,
+        "pose_label": template_data.pose_label,
+        "quality_score": template_data.quality_score,
+        "detection_score": template_data.detection_score,
         "created_at": new_template["created_at"].isoformat()
     }
 
@@ -1239,13 +1268,107 @@ async def delete_facial_template(employee_id: str, template_id: str, current_use
     db = await get_db()
     result = await db.facial_templates.delete_one({
         "_id": ObjectId(template_id),
-        "employee_id": ObjectId(employee_id)
+        "employee_id": {"$in": [employee_id, ObjectId(employee_id)]}
     })
     
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail='Template não encontrado')
     
+    await face_recognition_service.refresh_employee_cache(db, employee_id)
     return {'message': 'Template excluído'}
+
+@api_router.post('/facial/enroll', response_model=FacialEnrollResponse, status_code=status.HTTP_201_CREATED)
+async def facial_enroll(
+    payload: FacialEnrollRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    if not can_manage_employees(current_user['role']):
+        raise HTTPException(status_code=403, detail='Sem permissao')
+
+    db = await get_db()
+    employee = await db.employees.find_one({"_id": ObjectId(payload.employee_id)})
+    if not employee:
+        raise HTTPException(status_code=404, detail='Colaborador nao encontrado')
+
+    if not face_recognition_service.available:
+        raise HTTPException(status_code=503, detail='Servico facial backend indisponivel')
+
+    enroll_result = face_recognition_service.enroll_from_image(
+        payload.image_base64,
+        pose_label=payload.pose_label or 'frontal'
+    )
+    if enroll_result.get('status') != 'ok':
+        raise HTTPException(status_code=400, detail=enroll_result.get('message', 'Falha ao cadastrar biometria facial'))
+
+    descriptor_json = json.dumps(enroll_result['embedding'].tolist())
+    new_template = {
+        "employee_id": ObjectId(payload.employee_id),
+        "descriptor": descriptor_json,
+        "pose_label": enroll_result.get('pose_label') or payload.pose_label or 'frontal',
+        "quality_score": enroll_result.get('quality_score'),
+        "detection_score": enroll_result.get('detection_score'),
+        "created_at": datetime.now(timezone.utc)
+    }
+    result = await db.facial_templates.insert_one(new_template)
+    await face_recognition_service.refresh_employee_cache(db, payload.employee_id)
+
+    return FacialEnrollResponse(
+        status='ok',
+        message=enroll_result.get('message', 'Biometria facial cadastrada com sucesso.'),
+        employee_id=payload.employee_id,
+        template_id=str(result.inserted_id),
+        pose_label=new_template['pose_label'],
+        quality_score=new_template['quality_score'],
+        detection_score=new_template['detection_score']
+    )
+
+@api_router.post('/facial/identify-fast', response_model=FacialIdentifyFastResponse)
+async def facial_identify_fast(
+    payload: FacialIdentifyFastRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    if not can_deliver_epi(current_user['role']):
+        raise HTTPException(status_code=403, detail='Sem permissao para reconhecimento facial de entrega')
+
+    if not face_recognition_service.available:
+        raise HTTPException(status_code=503, detail='Servico facial backend indisponivel')
+
+    result = face_recognition_service.identify_fast(payload.image_base64)
+    return FacialIdentifyFastResponse(**result)
+
+@api_router.post('/facial/liveness-check', response_model=FacialLivenessResponse)
+async def facial_liveness_check(
+    payload: FacialLivenessRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    if not can_deliver_epi(current_user['role']):
+        raise HTTPException(status_code=403, detail='Sem permissao para prova de vida')
+
+    if not face_recognition_service.available:
+        raise HTTPException(status_code=503, detail='Servico facial backend indisponivel')
+
+    result = face_recognition_service.liveness_check(
+        payload.image_base64,
+        previous_image_base64=payload.previous_image_base64
+    )
+    return FacialLivenessResponse(**result)
+
+@api_router.get('/facial/migration-status', response_model=FacialMigrationStatusResponse)
+async def facial_migration_status(current_user: dict = Depends(require_role('admin', 'gestor'))):
+    db = await get_db()
+    status_data = await face_recognition_service.get_migration_status(db)
+    return FacialMigrationStatusResponse(**status_data)
+
+@api_router.post('/facial/reload-cache')
+async def facial_reload_cache(current_user: dict = Depends(require_role('admin', 'gestor'))):
+    db = await get_db()
+    await face_recognition_service.reload_cache(db)
+    return {
+        'message': 'Cache facial recarregado com sucesso',
+        'service_available': face_recognition_service.available,
+        'cache_size': face_recognition_service.cache_size,
+        'employees_loaded': face_recognition_service.cached_employee_count,
+    }
 
 # ===================== SUPPLIERS =====================
 
@@ -1543,6 +1666,10 @@ async def create_delivery(delivery_data: DeliveryCreate, current_user: dict = De
         "is_return": delivery_data.is_return,
         "facial_match_score": delivery_data.facial_match_score,
         "facial_photo_path": delivery_data.facial_photo_path,
+        "facial_validation_status": delivery_data.facial_validation_status,
+        "facial_validation_message": delivery_data.facial_validation_message,
+        "facial_liveness_status": delivery_data.facial_liveness_status,
+        "facial_second_capture_used": delivery_data.facial_second_capture_used,
         "notes": delivery_data.notes,
         "items": items_list,
         "delivered_by": current_user['id'],

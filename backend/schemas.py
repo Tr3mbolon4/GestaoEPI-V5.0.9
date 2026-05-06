@@ -415,6 +415,10 @@ class DeliveryCreate(BaseModel):
     is_return: bool = False
     facial_match_score: Optional[float] = None
     facial_photo_path: Optional[str] = None  # Foto de comprovante da entrega
+    facial_validation_status: Optional[str] = None
+    facial_validation_message: Optional[str] = None
+    facial_liveness_status: Optional[str] = None
+    facial_second_capture_used: bool = False
     notes: Optional[str] = None
     items: List[DeliveryItemInput]
 
@@ -427,6 +431,10 @@ class DeliveryResponse(BaseModel):
     photo_evidence_path: Optional[str] = None
     facial_match_score: Optional[float] = None
     facial_photo_path: Optional[str] = None
+    facial_validation_status: Optional[str] = None
+    facial_validation_message: Optional[str] = None
+    facial_liveness_status: Optional[str] = None
+    facial_second_capture_used: bool = False
     notes: Optional[str] = None
     items: List[dict] = []
     delivered_by: Optional[str] = None
@@ -459,6 +467,9 @@ class LicenseResponse(BaseModel):
 
 class FacialTemplateCreate(BaseModel):
     descriptor: str
+    pose_label: Optional[str] = None
+    quality_score: Optional[float] = None
+    detection_score: Optional[float] = None
     
     @field_validator('descriptor')
     @classmethod
@@ -485,7 +496,74 @@ class FacialTemplateResponse(BaseModel):
     id: str
     employee_id: str
     descriptor: str
+    pose_label: Optional[str] = None
+    quality_score: Optional[float] = None
+    detection_score: Optional[float] = None
     created_at: datetime
+
+
+class FacialEnrollRequest(BaseModel):
+    employee_id: str
+    image_base64: str
+    pose_label: Optional[str] = "frontal"
+
+
+class FacialEnrollResponse(BaseModel):
+    status: str
+    message: str
+    employee_id: str
+    template_id: Optional[str] = None
+    pose_label: Optional[str] = None
+    quality_score: Optional[float] = None
+    detection_score: Optional[float] = None
+
+
+class FacialIdentifyFastRequest(BaseModel):
+    image_base64: str
+
+
+class FacialIdentifyFastResponse(BaseModel):
+    employee_id: Optional[str] = None
+    employee_name: Optional[str] = None
+    similarity_score: float = 0.0
+    status: str
+    message: str
+    detection_confidence: Optional[float] = None
+    liveness_required: bool = False
+    matched_pose_label: Optional[str] = None
+
+
+class FacialLivenessRequest(BaseModel):
+    image_base64: str
+    previous_image_base64: Optional[str] = None
+
+
+class FacialLivenessResponse(BaseModel):
+    status: str
+    message: str
+    passed: bool = False
+    movement_delta: Optional[float] = None
+
+
+class FacialMigrationEmployeeStatus(BaseModel):
+    employee_id: str
+    employee_name: str
+    total_templates: int = 0
+    compatible_templates: int = 0
+    legacy_templates: int = 0
+    needs_reenrollment: bool = False
+
+
+class FacialMigrationStatusResponse(BaseModel):
+    service_available: bool
+    cache_size: int
+    total_templates: int
+    compatible_templates: int
+    legacy_templates: int
+    employees_with_templates: int
+    employees_ready: int
+    employees_needing_reenrollment: int
+    employees: List[FacialMigrationEmployeeStatus] = []
 
 
 

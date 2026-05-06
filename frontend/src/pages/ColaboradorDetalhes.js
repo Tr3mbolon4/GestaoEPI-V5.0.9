@@ -23,6 +23,22 @@ const FAST_DETECTOR_OPTIONS = new faceapi.TinyFaceDetectorOptions({
   scoreThreshold: 0.5   // Threshold médio para boa detecção
 });
 
+const TEMPLATE_CAPTURE_OPTIONS = new faceapi.TinyFaceDetectorOptions({
+  inputSize: 224,
+  scoreThreshold: 0.50
+});
+
+const TEMPLATE_CAPTURE_FRAMES = 5;
+const TEMPLATE_CAPTURE_DELAY = 60;
+
+const POSE_OPTIONS = [
+  { value: 'frontal', label: 'Frontal' },
+  { value: 'left_angle', label: 'Leve angulo esquerdo' },
+  { value: 'right_angle', label: 'Leve angulo direito' }
+];
+
+const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
+
 export default function ColaboradorDetalhes() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -46,6 +62,7 @@ export default function ColaboradorDetalhes() {
   const [capturingFace, setCapturingFace] = useState(false);
   const [faceDetected, setFaceDetected] = useState(false);
   const [captureStatus, setCaptureStatus] = useState('');
+  const [selectedPoseLabel, setSelectedPoseLabel] = useState('frontal');
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);  // Canvas fixo para overlay
   const detectionIntervalRef = useRef(null);
@@ -255,6 +272,78 @@ export default function ColaboradorDetalhes() {
   };
   
   // Função otimizada de captura - RÁPIDA e com feedback
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const loadImageFromDataUrl = (imageSrc) =>
+    new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = imageSrc;
+    });
+
+  const scoreTemplateFrame = (img, detection) => {
+    const box = detection.detection.box;
+    const centerX = box.x + box.width / 2;
+    const centerY = box.y + box.height / 2;
+    const offsetX = Math.abs(centerX - img.width / 2) / img.width;
+    const offsetY = Math.abs(centerY - img.height / 2) / img.height;
+    const faceAreaRatio = (box.width * box.height) / (img.width * img.height);
+    const centerScore = clamp(1 - ((offsetX + offsetY) / 0.6));
+    const sizeScore = clamp(1 - Math.abs(faceAreaRatio - 0.16) / 0.16);
+    const totalScore =
+      (detection.detection.score * 0.55) +
+      (centerScore * 0.25) +
+      (sizeScore * 0.20);
+
+    return {
+      totalScore,
+      detectionScore: detection.detection.score
+    };
+  };
+
+  const captureBestTemplateFrame = useCallback(async () => {
+    const candidates = [];
+
+    for (let index = 0; index < TEMPLATE_CAPTURE_FRAMES; index += 1) {
+      const imageSrc = webcamRef.current?.getScreenshot();
+      if (!imageSrc) {
+        await wait(TEMPLATE_CAPTURE_DELAY);
+        continue;
+      }
+
+      try {
+        const img = await loadImageFromDataUrl(imageSrc);
+        const detection = await faceapi
+          .detectSingleFace(img, TEMPLATE_CAPTURE_OPTIONS)
+          .withFaceLandmarks()
+          .withFaceDescriptor();
+
+        if (detection?.descriptor) {
+          const quality = scoreTemplateFrame(img, detection);
+          candidates.push({
+            imageSrc,
+            descriptor: detection.descriptor,
+            quality
+          });
+        }
+      } catch (error) {
+        console.warn('Frame ignorado no cadastro biometrico:', error?.message || error);
+      }
+
+      if (index < TEMPLATE_CAPTURE_FRAMES - 1) {
+        await wait(TEMPLATE_CAPTURE_DELAY);
+      }
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    return candidates.sort((left, right) => right.quality.totalScore - left.quality.totalScore)[0];
+  }, []);
+
   const captureFacialTemplate = useCallback(async () => {
     // 🔒 LOCK: Evitar múltiplas execuções simultâneas
     if (processingRef.current) {
@@ -405,7 +494,11 @@ export default function ColaboradorDetalhes() {
       }
       
       // Já tem consentimento, salvar diretamente
-      await saveFacialTemplate(descriptorJson);
+      await saveFacialTemplate(imageSrc, {
+        poseLabel: selectedPoseLabel,
+        qualityScore: detection.detection.score,
+        detectionScore: detection.detection.score
+      });
       
     } catch (error) {
       console.error('Erro ao processar facial:', error);
@@ -427,13 +520,17 @@ export default function ColaboradorDetalhes() {
   }, [faceDetected, modelsLoaded, id, hasConsent]);
   
   // Função para salvar o template facial após validações
-  const saveFacialTemplate = async (descriptorJson) => {
+  const saveFacialTemplate = async (imageSrc, metadata = {}) => {
     setCaptureStatus('Salvando template...');
     
     try {
       const response = await axios.post(
-        `${API}/employees/${id}/facial-templates`,
-        { descriptor: descriptorJson },
+        `${API}/facial/enroll`,
+        {
+          employee_id: id,
+          image_base64: imageSrc,
+          pose_label: metadata.poseLabel || selectedPoseLabel,
+        },
         { headers: getAuthHeader() }
       );
       
@@ -503,8 +600,8 @@ export default function ColaboradorDetalhes() {
       setShowConsentDialog(false);
       
       // Salvar o template que estava pendente
-      if (pendingDescriptor) {
-        await saveFacialTemplate(pendingDescriptor);
+      if (pendingImageSrc) {
+        await saveFacialTemplate(pendingImageSrc, { poseLabel: selectedPoseLabel });
       }
       
       toast.success('Consentimento registrado com sucesso!');
@@ -1485,7 +1582,27 @@ export default function ColaboradorDetalhes() {
             </div>
             
             {/* Alerta se não tem foto */}
-            {!colaborador.photo_path && (
+                <div className="mb-4">
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Angulo do template
+                  </label>
+                  <select
+                    value={selectedPoseLabel}
+                    onChange={(e) => setSelectedPoseLabel(e.target.value)}
+                    className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                  >
+                    {POSE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Cadastre ao menos um template frontal e, idealmente, mais dois templates com leve angulo esquerdo e direito.
+                  </p>
+                </div>
+
+                {!colaborador.photo_path && (
               <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg mb-6">
                 <div className="flex items-start gap-3">
                   <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
@@ -1521,12 +1638,17 @@ export default function ColaboradorDetalhes() {
                         <div className="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">
                           <CheckCircle className="w-5 h-5 text-emerald-600" />
                         </div>
-                        <div>
-                          <p className="font-medium text-slate-900">Template Facial #{idx + 1}</p>
-                          <p className="text-sm text-slate-600">
-                            Cadastrado em: {new Date(template.created_at).toLocaleString('pt-BR')}
-                          </p>
-                        </div>
+                          <div>
+                            <p className="font-medium text-slate-900">
+                              Template Facial #{idx + 1}
+                              <span className="ml-2 text-xs font-semibold uppercase text-emerald-700">
+                                {template.pose_label || 'frontal'}
+                              </span>
+                            </p>
+                            <p className="text-sm text-slate-600">
+                              Cadastrado em: {new Date(template.created_at).toLocaleString('pt-BR')}
+                            </p>
+                          </div>
                       </div>
                       <button
                         onClick={() => deleteFacialTemplate(template.id)}
