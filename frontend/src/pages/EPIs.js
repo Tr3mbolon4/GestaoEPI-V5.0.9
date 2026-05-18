@@ -10,6 +10,25 @@ import { Button } from '@/components/ui/button';
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
+const createEmptyVariation = () => ({
+  brand: '',
+  model: '',
+  color: '',
+  size: '',
+  material: '',
+  ca_number: '',
+  ca_validity: '',
+  supplier_id: '',
+  invoice_number: '',
+  purchase_date: '',
+  quantity_purchased: 0,
+  unit_price: 0,
+  validity_date: '',
+  qr_code: '',
+  internal_code: '',
+  batch: '',
+  current_stock: 0
+});
 
 export default function EPIs() {
   const { user } = useAuth();
@@ -25,6 +44,9 @@ export default function EPIs() {
   const [formData, setFormData] = useState({
     name: '',
     type_category: '',
+    description: '',
+    obrigatorio_ca: true,
+    possui_variacao_tamanho: false,
     brand: '',
     model: '',
     color: '',
@@ -49,7 +71,8 @@ export default function EPIs() {
     max_stock: 0,
     // NOVOS: Periodicidade de troca
     replacement_period: '',
-    replacement_days: ''
+    replacement_days: '',
+    extraVariations: []
   });
   
   const isAdmin = user?.role === 'admin';
@@ -98,29 +121,41 @@ export default function EPIs() {
     }
   };
 
+  const updateExtraVariation = (index, field, value) => {
+    setFormData((prev) => ({
+      ...prev,
+      extraVariations: prev.extraVariations.map((variation, variationIndex) =>
+        variationIndex === index ? { ...variation, [field]: value } : variation
+      )
+    }));
+  };
+
+  const addExtraVariation = () => {
+    setFormData((prev) => ({
+      ...prev,
+      extraVariations: [...prev.extraVariations, createEmptyVariation()]
+    }));
+  };
+
+  const removeExtraVariation = (index) => {
+    setFormData((prev) => ({
+      ...prev,
+      extraVariations: prev.extraVariations.filter((_, variationIndex) => variationIndex !== index)
+    }));
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
-    // Validar que pelo menos CA ou NBR deve ser preenchido
-    if (!formData.ca_number && !formData.nbr_number) {
-      toast.error('É necessário informar o número do CA ou NBR');
-      return;
-    }
-    
-    try {
-      // Preparar dados limpos para envio
-      const cleanData = {
-        name: formData.name,
-        type_category: formData.type_category,
-        ca_number: formData.ca_number || null,
-        nbr_number: formData.nbr_number || null,  // NOVO: Campo NBR
-        brand: formData.brand || null,
-        model: formData.model || null,
-        color: formData.color || null,
-        size: formData.size || null,
-        material: formData.material || null,
+
+    const variations = [
+      {
+        brand: formData.brand,
+        model: formData.model,
+        color: formData.color,
+        size: formData.size,
+        material: formData.material,
+        ca_number: formData.ca_number,
         ca_validity: formData.ca_validity || null,
-        technical_standard: formData.technical_standard || null,
         supplier_id: formData.supplier_id || null,
         invoice_number: formData.invoice_number || null,
         purchase_date: formData.purchase_date || null,
@@ -130,13 +165,39 @@ export default function EPIs() {
         qr_code: formData.qr_code || null,
         internal_code: formData.internal_code || null,
         batch: formData.batch || null,
+        current_stock: parseInt(formData.current_stock) || 0
+      },
+      ...formData.extraVariations
+    ].filter((variation) => (
+      variation.brand ||
+      variation.model ||
+      variation.ca_number ||
+      variation.size ||
+      variation.batch ||
+      variation.current_stock
+    ));
+
+    if (formData.obrigatorio_ca && !variations.some((variation) => variation.ca_number)) {
+      toast.error('Cadastre ao menos uma varia??o com CA');
+      return;
+    }
+
+    try {
+      const cleanData = {
+        name: formData.name,
+        type_category: formData.type_category,
+        category: formData.type_category,
+        description: formData.description || null,
+        obrigatorio_ca: formData.obrigatorio_ca,
+        nbr_number: formData.nbr_number || null,
+        possui_variacao_tamanho: formData.possui_variacao_tamanho,
+        technical_standard: formData.technical_standard || null,
         storage_location: formData.storage_location || null,
-        current_stock: parseInt(formData.current_stock) || 0,
         min_stock: parseInt(formData.min_stock) || 0,
         max_stock: parseInt(formData.max_stock) || 0,
-        // NOVOS: Periodicidade de troca
         replacement_period: formData.replacement_period || null,
-        replacement_days: formData.replacement_period === 'custom' ? parseInt(formData.replacement_days) || null : null
+        replacement_days: formData.replacement_period === 'custom' ? parseInt(formData.replacement_days) || null : null,
+        variations
       };
       
       if (editingEPI) {
@@ -169,35 +230,58 @@ export default function EPIs() {
   };
   
   const handleEdit = (epi) => {
+    const [primaryVariation, ...otherVariations] = epi.variations || [];
     setEditingEPI(epi);
     setFormData({
       name: epi.name || '',
       type_category: epi.type_category || '',
-      brand: epi.brand || '',
-      model: epi.model || '',
-      color: epi.color || '',
-      size: epi.size || '',
-      material: epi.material || '',
-      ca_number: epi.ca_number || '',
+      description: epi.description || '',
+      obrigatorio_ca: epi.obrigatorio_ca !== false,
+      possui_variacao_tamanho: epi.possui_variacao_tamanho || false,
+      brand: primaryVariation?.brand || epi.brand || '',
+      model: primaryVariation?.model || epi.model || '',
+      color: primaryVariation?.color || epi.color || '',
+      size: primaryVariation?.size || epi.size || '',
+      material: primaryVariation?.material || epi.material || '',
+      ca_number: primaryVariation?.ca_number || epi.ca_number || '',
       nbr_number: epi.nbr_number || '',  // NOVO: Campo NBR
-      ca_validity: epi.ca_validity ? epi.ca_validity.split('T')[0] : '',
+      ca_validity: (primaryVariation?.ca_validity || epi.ca_validity) ? (primaryVariation?.ca_validity || epi.ca_validity).split('T')[0] : '',
       technical_standard: epi.technical_standard || '',
-      supplier_id: epi.supplier_id || '',
-      invoice_number: epi.invoice_number || '',
-      purchase_date: epi.purchase_date ? epi.purchase_date.split('T')[0] : '',
-      quantity_purchased: epi.quantity_purchased || 0,
-      unit_price: epi.unit_price || 0,
-      validity_date: epi.validity_date ? epi.validity_date.split('T')[0] : '',
-      qr_code: epi.qr_code || '',
-      internal_code: epi.internal_code || '',
-      batch: epi.batch || '',
+      supplier_id: primaryVariation?.supplier_id || epi.supplier_id || '',
+      invoice_number: primaryVariation?.invoice_number || epi.invoice_number || '',
+      purchase_date: (primaryVariation?.purchase_date || epi.purchase_date) ? (primaryVariation?.purchase_date || epi.purchase_date).split('T')[0] : '',
+      quantity_purchased: primaryVariation?.quantity_purchased || epi.quantity_purchased || 0,
+      unit_price: primaryVariation?.unit_price || epi.unit_price || 0,
+      validity_date: (primaryVariation?.validity_date || epi.validity_date) ? (primaryVariation?.validity_date || epi.validity_date).split('T')[0] : '',
+      qr_code: primaryVariation?.qr_code || epi.qr_code || '',
+      internal_code: primaryVariation?.internal_code || epi.internal_code || '',
+      batch: primaryVariation?.batch || epi.batch || '',
       storage_location: epi.storage_location || '',
-      current_stock: epi.current_stock || 0,
+      current_stock: primaryVariation?.current_stock || epi.current_stock || 0,
       min_stock: epi.min_stock || 0,
       max_stock: epi.max_stock || 0,
       // NOVOS: Periodicidade de troca
       replacement_period: epi.replacement_period || '',
-      replacement_days: epi.replacement_days || ''
+      replacement_days: epi.replacement_days || '',
+      extraVariations: otherVariations.map((variation) => ({
+        brand: variation.brand || '',
+        model: variation.model || '',
+        color: variation.color || '',
+        size: variation.size || '',
+        material: variation.material || '',
+        ca_number: variation.ca_number || '',
+        ca_validity: variation.ca_validity ? variation.ca_validity.split('T')[0] : '',
+        supplier_id: variation.supplier_id || '',
+        invoice_number: variation.invoice_number || '',
+        purchase_date: variation.purchase_date ? variation.purchase_date.split('T')[0] : '',
+        quantity_purchased: variation.quantity_purchased || 0,
+        unit_price: variation.unit_price || 0,
+        validity_date: variation.validity_date ? variation.validity_date.split('T')[0] : '',
+        qr_code: variation.qr_code || '',
+        internal_code: variation.internal_code || '',
+        batch: variation.batch || '',
+        current_stock: variation.current_stock || 0
+      }))
     });
     setShowDialog(true);
   };
@@ -332,6 +416,9 @@ export default function EPIs() {
     setFormData({
       name: '',
       type_category: '',
+      description: '',
+      obrigatorio_ca: true,
+      possui_variacao_tamanho: false,
       brand: '',
       model: '',
       color: '',
@@ -356,7 +443,8 @@ export default function EPIs() {
       max_stock: 0,
       // NOVOS: Periodicidade de troca
       replacement_period: '',
-      replacement_days: ''
+      replacement_days: '',
+      extraVariations: []
     });
     setEditingEPI(null);
   };
@@ -453,6 +541,15 @@ export default function EPIs() {
                       value={formData.name}
                       onChange={(e) => setFormData({...formData, name: e.target.value})}
                       className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div className="col-span-3">
+                    <label className="block text-sm font-medium mb-1">Descrição do EPI Base</label>
+                    <textarea
+                      value={formData.description}
+                      onChange={(e) => setFormData({...formData, description: e.target.value})}
+                      className="flex min-h-16 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                      placeholder="Descreva o EPI base sem amarrar CA, lote ou fornecedor"
                     />
                   </div>
                   <div>

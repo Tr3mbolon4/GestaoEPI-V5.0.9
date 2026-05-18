@@ -32,6 +32,7 @@ const TARGET_FACE_AREA_RATIO = 0.16;
 const MOTION_TOLERANCE_RATIO = 0.08;
 
 const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
+const normalizeSize = (value) => (value ? String(value).trim().toUpperCase() : '');
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -174,6 +175,8 @@ export default function EntregaEPI() {
   const [epis, setEpis] = useState([]);
   const [kits, setKits] = useState([]);
   const [selectedItems, setSelectedItems] = useState([]);
+  const [deliverySuggestion, setDeliverySuggestion] = useState(null);
+  const [suggestionLoading, setSuggestionLoading] = useState(false);
   const [deliveryType, setDeliveryType] = useState('delivery');
   const [loading, setLoading] = useState(false);
   const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -257,6 +260,12 @@ export default function EntregaEPI() {
       setTemplatesLoaded(true);
     }
   }, [modelsLoaded, templatesLoaded]);
+
+  useEffect(() => {
+    if (selectedEmployee && step === 'delivery') {
+      fetchDeliverySuggestions(selectedEmployee.id);
+    }
+  }, [selectedEmployee, step]);
 
   const configureTensorflowBackend = async () => {
     try {
@@ -1074,6 +1083,80 @@ export default function EntregaEPI() {
     }
   };
 
+  const inferEmployeeSizeField = (epi) => {
+    const category = `${epi?.category || epi?.type_category || ''}`.toLowerCase();
+    const name = `${epi?.name || ''}`.toLowerCase();
+    if (['botina', 'bota', 'sapato', 'calcado', 'calçado'].some(token => name.includes(token)) || category.includes('pés') || category.includes('pes')) {
+      return 'tamanho_calcado';
+    }
+    if (name.includes('luva') || category.includes('mãos') || category.includes('maos')) {
+      return 'tamanho_luva';
+    }
+    if (['calça', 'calca', 'bermuda'].some(token => name.includes(token)) || category.includes('pernas')) {
+      return 'tamanho_calca';
+    }
+    if (['camisa', 'camiseta', 'jaqueta', 'jaleco', 'avental'].some(token => name.includes(token)) || category.includes('corpo')) {
+      return 'tamanho_camisa';
+    }
+    return null;
+  };
+
+  const resolveVariationForEmployee = (epi) => {
+    const variations = epi?.variations || [];
+    if (!variations.length) return null;
+
+    const sizeField = inferEmployeeSizeField(epi);
+    const desiredSize = normalizeSize(sizeField ? selectedEmployee?.[sizeField] : '');
+    const candidates = variations.filter((variation) => (variation.current_stock || 0) > 0 && variation.status !== 'inativo');
+
+    if (desiredSize) {
+      const exact = candidates.find((variation) => normalizeSize(variation.size || variation.tamanho) === desiredSize);
+      if (exact) return exact;
+      return null;
+    }
+
+    return candidates[0] || null;
+  };
+
+  const mapSuggestionItemToSelectedItem = (item, kitName) => ({
+    epi_id: item.epi_id,
+    epi_variation_id: item.epi_variation_id || item.variation?.id,
+    name: item.name,
+    quantity: item.quantity || 1,
+    size: item.variation?.size || item.variation?.tamanho || item.requested_size || '',
+    batch: item.variation?.batch || item.variation?.lote || '',
+    qr_code: item.variation?.qr_code || '',
+    ca_number: item.variation?.ca_number || item.variation?.ca || '',
+    from_kit: kitName || item.kit_name || ''
+  });
+
+  const fetchDeliverySuggestions = async (employeeId, kitId = '') => {
+    try {
+      setSuggestionLoading(true);
+      const query = kitId ? `?kit_id=${kitId}` : '';
+      const response = await axios.get(`${API}/employees/${employeeId}/delivery-suggestions${query}`, {
+        headers: getAuthHeader()
+      });
+      setDeliverySuggestion(response.data);
+
+      const availableItems = (response.data.items || []).filter((item) => item.status === 'available');
+      const unavailableItems = (response.data.items || []).filter((item) => item.status !== 'available');
+
+      if (kitId || (response.data.kit_id && selectedItems.length === 0)) {
+        setSelectedItems(availableItems.map((item) => mapSuggestionItemToSelectedItem(item, response.data.kit_name)));
+      }
+
+      unavailableItems.forEach((item) => {
+        toast.warning(item.message || `Sem estoque para ${item.name}`);
+      });
+    } catch (error) {
+      console.error('Erro ao buscar sugestões de entrega:', error);
+      setDeliverySuggestion(null);
+    } finally {
+      setSuggestionLoading(false);
+    }
+  };
+
   const handleQRScan = async (qrCode) => {
     if (qrScannerRef.current) {
       try {
@@ -1136,32 +1219,32 @@ export default function EntregaEPI() {
   };
 
   const addItem = (epi) => {
+    const variation = resolveVariationForEmployee(epi);
+    if (!variation && inferEmployeeSizeField(epi)) {
+      toast.error('Sem estoque disponível para tamanho solicitado.');
+      return;
+    }
     if (!selectedItems.find(item => item.epi_id === epi.id)) {
       setSelectedItems([...selectedItems, {
         epi_id: epi.id,
+        epi_variation_id: variation?.id,
         name: epi.name,
         quantity: 1,
-        size: epi.size,
-        batch: epi.batch,
-        qr_code: epi.qr_code,
-        ca_number: epi.ca_number
+        size: variation?.size || variation?.tamanho || epi.size,
+        batch: variation?.batch || variation?.lote || epi.batch,
+        qr_code: variation?.qr_code || epi.qr_code,
+        ca_number: variation?.ca_number || variation?.ca || epi.ca_number
       }]);
     }
   };
 
-  const addKit = (kit) => {
-    kit.items.forEach(kitItem => {
-      if (!selectedItems.find(item => item.epi_id === kitItem.epi_id)) {
-        setSelectedItems(prev => [...prev, {
-          epi_id: kitItem.epi_id,
-          name: kitItem.name,
-          quantity: kitItem.quantity,
-          ca_number: kitItem.ca_number,
-          from_kit: kit.name
-        }]);
-      }
-    });
-    toast.success(`Kit "${kit.name}" adicionado com ${kit.items.length} itens`);
+  const addKit = async (kit) => {
+    if (!selectedEmployee) {
+      toast.error('Identifique um colaborador antes de carregar o kit');
+      return;
+    }
+    await fetchDeliverySuggestions(selectedEmployee.id, kit.id);
+    toast.success(`Kit "${kit.name}" carregado com sugestão automática de tamanhos`);
   };
 
   const removeItem = (index) => {
@@ -1244,6 +1327,7 @@ export default function EntregaEPI() {
     setSelectedEmployee(null);
     setFacialMatch(null);
     setSelectedItems([]);
+    setDeliverySuggestion(null);
     setEmployeeHistory([]);
     setEmployeeCurrentItems([]);
     setCapturedPhoto(null);
@@ -1635,6 +1719,14 @@ export default function EntregaEPI() {
 
             {/* Seleção de Kit */}
             <div className={kits.length > 0 ? 'mb-4' : 'hidden'}>
+              {deliverySuggestion?.kit_name && (
+                <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900">
+                  <p className="font-medium">Kit sugerido automaticamente: {deliverySuggestion.kit_name}</p>
+                  <p className="text-emerald-700">
+                    {suggestionLoading ? 'Buscando variações e tamanhos...' : `${deliverySuggestion.items?.filter(item => item.status === 'available').length || 0} item(ns) prontos para entrega`}
+                  </p>
+                </div>
+              )}
               <label className="block text-sm font-medium text-slate-700 mb-2">
                 Entregar Kit Completo:
               </label>

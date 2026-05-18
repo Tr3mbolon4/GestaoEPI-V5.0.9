@@ -116,7 +116,11 @@ export default function Colaboradores() {
     position: '',
     department: '',
     status: 'active',
-    facial_consent: false
+    facial_consent: false,
+    tamanho_calcado: '',
+    tamanho_luva: '',
+    tamanho_camisa: '',
+    tamanho_calca: ''
   });
   
   const isAdmin = user?.role === 'admin';
@@ -433,7 +437,11 @@ export default function Colaboradores() {
       position: colaborador.position || '',
       department: colaborador.department || '',
       status: colaborador.status || 'active',
-      facial_consent: colaborador.facial_consent || false
+      facial_consent: colaborador.facial_consent || false,
+      tamanho_calcado: colaborador.tamanho_calcado || '',
+      tamanho_luva: colaborador.tamanho_luva || '',
+      tamanho_camisa: colaborador.tamanho_camisa || '',
+      tamanho_calca: colaborador.tamanho_calca || ''
     });
     if (colaborador.photo_path) {
       setPhotoPreview(getUploadUrl(colaborador.photo_path));
@@ -462,7 +470,11 @@ export default function Colaboradores() {
       position: '',
       department: '',
       status: 'active',
-      facial_consent: false
+      facial_consent: false,
+      tamanho_calcado: '',
+      tamanho_luva: '',
+      tamanho_camisa: '',
+      tamanho_calca: ''
     });
     setPhotoFile(null);
     setPhotoPreview(null);
@@ -667,6 +679,46 @@ export default function Colaboradores() {
                       value={formData.department}
                       onChange={(e) => setFormData({...formData, department: e.target.value})}
                       className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Tamanho do Calçado</label>
+                    <input
+                      type="text"
+                      value={formData.tamanho_calcado}
+                      onChange={(e) => setFormData({...formData, tamanho_calcado: e.target.value})}
+                      className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                      placeholder="Ex: 40"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Tamanho da Luva</label>
+                    <input
+                      type="text"
+                      value={formData.tamanho_luva}
+                      onChange={(e) => setFormData({...formData, tamanho_luva: e.target.value})}
+                      className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                      placeholder="Ex: M"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Tamanho da Camisa</label>
+                    <input
+                      type="text"
+                      value={formData.tamanho_camisa}
+                      onChange={(e) => setFormData({...formData, tamanho_camisa: e.target.value})}
+                      className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                      placeholder="Ex: G"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium mb-1">Tamanho da Calça</label>
+                    <input
+                      type="text"
+                      value={formData.tamanho_calca}
+                      onChange={(e) => setFormData({...formData, tamanho_calca: e.target.value})}
+                      className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                      placeholder="Ex: 42"
                     />
                   </div>
                 </div>

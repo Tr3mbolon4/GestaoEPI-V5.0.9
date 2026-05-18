@@ -176,6 +176,10 @@ class EmployeeCreate(BaseModel):
     position: Optional[str] = None
     status: EmployeeStatus = EmployeeStatus.ACTIVE
     facial_consent: bool = False
+    tamanho_calcado: Optional[str] = None
+    tamanho_luva: Optional[str] = None
+    tamanho_camisa: Optional[str] = None
+    tamanho_calca: Optional[str] = None
     notes: Optional[str] = None
 
 class EmployeeUpdate(BaseModel):
@@ -191,6 +195,10 @@ class EmployeeUpdate(BaseModel):
     facial_consent: Optional[bool] = None
     facial_consent_date: Optional[datetime] = None
     facial_consent_ip: Optional[str] = None
+    tamanho_calcado: Optional[str] = None
+    tamanho_luva: Optional[str] = None
+    tamanho_camisa: Optional[str] = None
+    tamanho_calca: Optional[str] = None
     notes: Optional[str] = None
 
 class EmployeeResponse(BaseModel):
@@ -209,6 +217,10 @@ class EmployeeResponse(BaseModel):
     facial_consent: Optional[bool] = False
     facial_consent_date: Optional[datetime] = None
     facial_consent_ip: Optional[str] = None
+    tamanho_calcado: Optional[str] = None
+    tamanho_luva: Optional[str] = None
+    tamanho_camisa: Optional[str] = None
+    tamanho_calca: Optional[str] = None
     notes: Optional[str] = None
     admission_date: Optional[datetime] = None
     phone: Optional[str] = None
@@ -262,6 +274,11 @@ class ReplacementPeriod(str, Enum):
 class EPICreate(BaseModel):
     name: str
     type_category: str
+    category: Optional[str] = None
+    description: Optional[str] = None
+    obrigatorio_ca: bool = True
+    nbr: Optional[str] = None
+    possui_variacao_tamanho: bool = False
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None
@@ -292,6 +309,8 @@ class EPICreate(BaseModel):
     replacement_period: Optional[ReplacementPeriod] = None
     replacement_days: Optional[int] = None  # Para período custom
     
+    variations: List[dict] = []
+
     @field_validator('ca_number', 'nbr_number')
     @classmethod
     def validate_ca_or_nbr(cls, v, info):
@@ -301,6 +320,11 @@ class EPICreate(BaseModel):
 class EPIUpdate(BaseModel):
     name: Optional[str] = None
     type_category: Optional[str] = None
+    category: Optional[str] = None
+    description: Optional[str] = None
+    obrigatorio_ca: Optional[bool] = None
+    nbr: Optional[str] = None
+    possui_variacao_tamanho: Optional[bool] = None
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None
@@ -330,11 +354,17 @@ class EPIUpdate(BaseModel):
     # NOVOS CAMPOS - Periodicidade de troca
     replacement_period: Optional[ReplacementPeriod] = None
     replacement_days: Optional[int] = None
+    variations: Optional[List[dict]] = None
 
 class EPIResponse(BaseModel):
     id: str
     name: str
     type_category: str
+    category: Optional[str] = None
+    description: Optional[str] = None
+    obrigatorio_ca: bool = True
+    nbr: Optional[str] = None
+    possui_variacao_tamanho: bool = False
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None
@@ -345,6 +375,7 @@ class EPIResponse(BaseModel):
     ca_validity: Optional[datetime] = None
     technical_standard: Optional[str] = None
     supplier_id: Optional[str] = None
+    supplier_name: Optional[str] = None
     invoice_number: Optional[str] = None
     purchase_date: Optional[datetime] = None
     quantity_purchased: int
@@ -366,6 +397,7 @@ class EPIResponse(BaseModel):
     # NOVOS CAMPOS - Periodicidade de troca
     replacement_period: Optional[str] = None
     replacement_days: Optional[int] = None
+    variations: List[dict] = []
     created_at: datetime
 
 # ===================== KIT =====================
@@ -401,6 +433,7 @@ class KitResponse(BaseModel):
 
 class DeliveryItemInput(BaseModel):
     epi_id: Optional[str] = None
+    epi_variation_id: Optional[str] = None
     kit_id: Optional[str] = None
     quantity: int = 1
     size: Optional[str] = None
@@ -440,6 +473,35 @@ class DeliveryResponse(BaseModel):
     delivered_by: Optional[str] = None
     delivered_by_name: Optional[str] = None  # NOVO: Nome do responsável pela entrega
     created_at: datetime
+
+class EPIVariationCreate(BaseModel):
+    marca: Optional[str] = None
+    modelo: Optional[str] = None
+    ca: Optional[str] = None
+    supplier_id: Optional[str] = None
+    fornecedor: Optional[str] = None
+    validade_ca: Optional[datetime] = None
+    tamanho: Optional[str] = None
+    cor: Optional[str] = None
+    quantidade_estoque: int = 0
+    valor_unitario: Optional[float] = None
+    data_compra: Optional[datetime] = None
+    lote: Optional[str] = None
+    status: Optional[str] = "ativo"
+    qr_code: Optional[str] = None
+    internal_code: Optional[str] = None
+    invoice_number: Optional[str] = None
+    validity_date: Optional[datetime] = None
+    material: Optional[str] = None
+    technical_standard: Optional[str] = None
+
+class DeliverySuggestionResponse(BaseModel):
+    employee_id: str
+    employee_name: str
+    department: Optional[str] = None
+    kit_id: Optional[str] = None
+    kit_name: Optional[str] = None
+    items: List[dict] = []
 
 # ===================== STOCK =====================
 

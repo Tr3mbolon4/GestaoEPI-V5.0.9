@@ -57,6 +57,16 @@ async def create_indexes():
         IndexModel([("internal_code", ASCENDING)], unique=True, partialFilterExpression={"internal_code": {"$type": "string"}}),
         IndexModel([("qr_code", ASCENDING)], unique=True, partialFilterExpression={"qr_code": {"$type": "string"}})
     ])
+
+    await db.epi_variations.create_indexes([
+        IndexModel([("epi_id", ASCENDING)]),
+        IndexModel([("ca_number", ASCENDING)]),
+        IndexModel([("supplier_id", ASCENDING)]),
+        IndexModel([("size", ASCENDING)]),
+        IndexModel([("batch", ASCENDING)]),
+        IndexModel([("internal_code", ASCENDING)], unique=True, partialFilterExpression={"internal_code": {"$type": "string"}}),
+        IndexModel([("qr_code", ASCENDING)], unique=True, partialFilterExpression={"qr_code": {"$type": "string"}})
+    ])
     
     # Tools indexes
     await db.tools.create_indexes([

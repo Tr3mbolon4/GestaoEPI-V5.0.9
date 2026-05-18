@@ -1408,6 +1408,308 @@ async def delete_supplier(supplier_id: str, current_user: dict = Depends(require
 
 # ===================== EPIS =====================
 
+def normalize_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+def normalize_size_value(value: Optional[str]) -> Optional[str]:
+    text = normalize_text(value)
+    return text.upper() if text else None
+
+def infer_epi_category(epi: dict) -> str:
+    return epi.get('category') or epi.get('type_category') or 'Sem categoria'
+
+def infer_epi_nbr(epi: dict) -> Optional[str]:
+    return epi.get('nbr') or epi.get('nbr_number')
+
+def infer_epi_has_size(epi: dict, variations: List[dict]) -> bool:
+    if epi.get('possui_variacao_tamanho') is not None:
+        return bool(epi.get('possui_variacao_tamanho'))
+    if normalize_text(epi.get('size')):
+        return True
+    return any(normalize_text(v.get('size')) for v in variations)
+
+async def get_supplier_name(db, supplier_id: Optional[str]) -> Optional[str]:
+    if not supplier_id:
+        return None
+    supplier = await db.suppliers.find_one({"_id": ObjectId(supplier_id)})
+    return supplier.get('name') if supplier else None
+
+async def create_variation_from_legacy_epi(db, epi: dict) -> Optional[dict]:
+    epi_id = str(epi['_id'])
+    existing = await db.epi_variations.find_one({"epi_id": epi_id})
+    if existing:
+        return existing
+    has_legacy_data = any([
+        normalize_text(epi.get('brand')),
+        normalize_text(epi.get('model')),
+        normalize_text(epi.get('ca_number')),
+        normalize_text(epi.get('supplier_id')),
+        normalize_text(epi.get('batch')),
+        normalize_text(epi.get('size')),
+        epi.get('current_stock') is not None
+    ])
+    if not has_legacy_data:
+        return None
+
+    variation = {
+        "epi_id": epi_id,
+        "brand": epi.get('brand'),
+        "model": epi.get('model'),
+        "ca_number": epi.get('ca_number'),
+        "supplier_id": epi.get('supplier_id'),
+        "supplier_name": await get_supplier_name(db, epi.get('supplier_id')),
+        "ca_validity": epi.get('ca_validity'),
+        "size": epi.get('size'),
+        "color": epi.get('color'),
+        "current_stock": epi.get('current_stock', 0) or 0,
+        "unit_price": epi.get('unit_price'),
+        "purchase_date": epi.get('purchase_date'),
+        "batch": epi.get('batch'),
+        "status": epi.get('status') or 'ativo',
+        "qr_code": epi.get('qr_code'),
+        "internal_code": epi.get('internal_code'),
+        "invoice_number": epi.get('invoice_number'),
+        "validity_date": epi.get('validity_date'),
+        "material": epi.get('material'),
+        "technical_standard": epi.get('technical_standard'),
+        "quantity_purchased": epi.get('quantity_purchased', epi.get('current_stock', 0) or 0),
+        "created_at": epi.get('created_at') or datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
+    }
+    result = await db.epi_variations.insert_one(variation)
+    variation['_id'] = result.inserted_id
+    return variation
+
+async def get_epi_variations(db, epi: dict) -> List[dict]:
+    await create_variation_from_legacy_epi(db, epi)
+    return await db.epi_variations.find({"epi_id": str(epi['_id'])}).to_list(200)
+
+def serialize_epi_variation(variation: dict) -> dict:
+    return {
+        "id": str(variation['_id']),
+        "epi_id": variation.get('epi_id'),
+        "brand": variation.get('brand'),
+        "marca": variation.get('brand'),
+        "model": variation.get('model'),
+        "modelo": variation.get('model'),
+        "ca_number": variation.get('ca_number'),
+        "ca": variation.get('ca_number'),
+        "supplier_id": variation.get('supplier_id'),
+        "supplier_name": variation.get('supplier_name'),
+        "fornecedor": variation.get('supplier_name'),
+        "ca_validity": variation.get('ca_validity'),
+        "validade_ca": variation.get('ca_validity'),
+        "size": variation.get('size'),
+        "tamanho": variation.get('size'),
+        "color": variation.get('color'),
+        "cor": variation.get('color'),
+        "current_stock": variation.get('current_stock', 0) or 0,
+        "quantidade_estoque": variation.get('current_stock', 0) or 0,
+        "unit_price": variation.get('unit_price'),
+        "valor_unitario": variation.get('unit_price'),
+        "purchase_date": variation.get('purchase_date'),
+        "data_compra": variation.get('purchase_date'),
+        "batch": variation.get('batch'),
+        "lote": variation.get('batch'),
+        "status": variation.get('status'),
+        "qr_code": variation.get('qr_code'),
+        "internal_code": variation.get('internal_code'),
+        "invoice_number": variation.get('invoice_number'),
+        "validity_date": variation.get('validity_date'),
+        "material": variation.get('material'),
+        "technical_standard": variation.get('technical_standard'),
+        "quantity_purchased": variation.get('quantity_purchased', 0) or 0
+    }
+
+def choose_primary_variation(variations: List[dict]) -> Optional[dict]:
+    if not variations:
+        return None
+    ranked = sorted(
+        variations,
+        key=lambda item: (
+            0 if (item.get('status') or 'ativo') == 'ativo' else 1,
+            -(item.get('current_stock', 0) or 0),
+            normalize_text(item.get('size')) is None
+        )
+    )
+    return ranked[0]
+
+async def sync_epi_stock_summary(db, epi_id: str) -> None:
+    variations = await db.epi_variations.find({"epi_id": epi_id}).to_list(200)
+    total_stock = sum((item.get('current_stock', 0) or 0) for item in variations)
+    total_purchased = sum((item.get('quantity_purchased', 0) or 0) for item in variations)
+    await db.epis.update_one(
+        {"_id": ObjectId(epi_id)},
+        {"$set": {
+            "current_stock": total_stock,
+            "quantity_purchased": total_purchased,
+            "updated_at": datetime.now(timezone.utc)
+        }}
+    )
+
+async def build_epi_response(db, epi: dict) -> dict:
+    variations = await get_epi_variations(db, epi)
+    for variation in variations:
+        if variation.get('supplier_id') and not variation.get('supplier_name'):
+            variation['supplier_name'] = await get_supplier_name(db, variation.get('supplier_id'))
+    primary = choose_primary_variation(variations)
+    serialized_variations = [serialize_epi_variation(item) for item in variations]
+    total_stock = sum(item.get('current_stock', 0) or 0 for item in variations)
+    total_purchased = sum(item.get('quantity_purchased', 0) or 0 for item in variations)
+    validity_candidates = [
+        item.get('validity_date') or item.get('ca_validity')
+        for item in variations
+        if item.get('validity_date') or item.get('ca_validity')
+    ]
+    validity_date = min(validity_candidates) if validity_candidates else None
+    response = doc_to_response(epi)
+    response.update({
+        "category": infer_epi_category(epi),
+        "type_category": infer_epi_category(epi),
+        "description": epi.get('description'),
+        "obrigatorio_ca": epi.get('obrigatorio_ca', True),
+        "nbr": infer_epi_nbr(epi),
+        "nbr_number": infer_epi_nbr(epi),
+        "possui_variacao_tamanho": infer_epi_has_size(epi, variations),
+        "variations": serialized_variations,
+        "current_stock": total_stock,
+        "quantity_purchased": total_purchased,
+        "min_stock": epi.get('min_stock', 0) or 0,
+        "max_stock": epi.get('max_stock')
+    })
+    if primary:
+        response.update({
+            "brand": primary.get('brand'),
+            "model": primary.get('model'),
+            "color": primary.get('color'),
+            "size": primary.get('size'),
+            "material": primary.get('material'),
+            "ca_number": primary.get('ca_number'),
+            "ca_validity": primary.get('ca_validity'),
+            "technical_standard": primary.get('technical_standard'),
+            "supplier_id": primary.get('supplier_id'),
+            "supplier_name": primary.get('supplier_name'),
+            "invoice_number": primary.get('invoice_number'),
+            "purchase_date": primary.get('purchase_date'),
+            "unit_price": primary.get('unit_price'),
+            "total_price": (primary.get('unit_price') or 0) * (primary.get('quantity_purchased') or 0),
+            "internal_code": primary.get('internal_code'),
+            "batch": primary.get('batch'),
+            "qr_code": primary.get('qr_code'),
+            "validity_date": validity_date or primary.get('validity_date')
+        })
+    else:
+        response["validity_date"] = validity_date
+    stock_status, validity_status = calculate_epi_status(response)
+    response['stock_status'] = stock_status
+    response['validity_status'] = validity_status
+    return response
+
+async def build_kit_response(db, kit: dict) -> dict:
+    response = doc_to_response(kit)
+    items = []
+    for raw_item in kit.get('items', []):
+        epi_id = raw_item.get('epi_id')
+        item = {"epi_id": epi_id, "quantity": raw_item.get('quantity', 1)}
+        if epi_id:
+            epi = await db.epis.find_one({"_id": ObjectId(epi_id)})
+            if epi:
+                epi_data = await build_epi_response(db, epi)
+                item.update({
+                    "name": epi_data.get('name'),
+                    "category": epi_data.get('category'),
+                    "type_category": epi_data.get('type_category'),
+                    "possui_variacao_tamanho": epi_data.get('possui_variacao_tamanho', False)
+                })
+        items.append(item)
+    response['items'] = items
+    return response
+
+def infer_employee_size_field(epi: dict) -> Optional[str]:
+    category = (infer_epi_category(epi) or '').lower()
+    name = (epi.get('name') or '').lower()
+    if any(token in name for token in ['botina', 'bota', 'sapato', 'calçado', 'calcado']) or 'pés' in category or 'pes' in category:
+        return 'tamanho_calcado'
+    if 'luva' in name or 'mãos' in category or 'maos' in category:
+        return 'tamanho_luva'
+    if any(token in name for token in ['calça', 'calca', 'bermuda']) or 'pernas' in category:
+        return 'tamanho_calca'
+    if any(token in name for token in ['camisa', 'camiseta', 'jaqueta', 'jaleco', 'avental']) or 'corpo' in category:
+        return 'tamanho_camisa'
+    return None
+
+async def resolve_epi_variation(db, epi: dict, employee: Optional[dict] = None, requested_size: Optional[str] = None, requested_variation_id: Optional[str] = None, require_stock: bool = True) -> Optional[dict]:
+    variations = await get_epi_variations(db, epi)
+    if requested_variation_id:
+        for variation in variations:
+            if str(variation['_id']) == requested_variation_id:
+                if not require_stock or (variation.get('current_stock', 0) or 0) > 0:
+                    return variation
+                return None
+    desired_size = normalize_size_value(requested_size)
+    size_field = infer_employee_size_field(epi)
+    if not desired_size and employee and size_field:
+        desired_size = normalize_size_value(employee.get(size_field))
+    active = [item for item in variations if (item.get('status') or 'ativo') != 'inativo']
+    candidates = [item for item in active if not require_stock or (item.get('current_stock', 0) or 0) > 0]
+    if desired_size:
+        exact = [item for item in candidates if normalize_size_value(item.get('size')) == desired_size]
+        if exact:
+            return choose_primary_variation(exact)
+        if require_stock:
+            return None
+    generic = [item for item in candidates if not normalize_size_value(item.get('size'))]
+    if generic:
+        return choose_primary_variation(generic)
+    return choose_primary_variation(candidates)
+
+async def build_delivery_suggestions_for_kit(db, employee: dict, kit: dict) -> dict:
+    items = []
+    for raw_item in kit.get('items', []):
+        epi_id = raw_item.get('epi_id')
+        if not epi_id:
+            continue
+        epi = await db.epis.find_one({"_id": ObjectId(epi_id)})
+        if not epi:
+            continue
+        epi_data = await build_epi_response(db, epi)
+        size_field = infer_employee_size_field(epi_data)
+        requested_size = employee.get(size_field) if size_field else None
+        variation = await resolve_epi_variation(db, epi, employee=employee, require_stock=True)
+        if variation:
+            items.append({
+                "epi_id": epi_id,
+                "epi_variation_id": str(variation['_id']),
+                "name": epi_data.get('name'),
+                "quantity": raw_item.get('quantity', 1),
+                "size_source": size_field,
+                "requested_size": requested_size,
+                "status": "available",
+                "message": "VariaÃ§Ã£o encontrada em estoque",
+                "variation": serialize_epi_variation(variation)
+            })
+        else:
+            items.append({
+                "epi_id": epi_id,
+                "name": epi_data.get('name'),
+                "quantity": raw_item.get('quantity', 1),
+                "size_source": size_field,
+                "requested_size": requested_size,
+                "status": "unavailable",
+                "message": "Sem estoque disponÃ­vel para tamanho solicitado."
+            })
+    return {
+        "employee_id": str(employee['_id']),
+        "employee_name": employee.get('full_name', ''),
+        "department": employee.get('department'),
+        "kit_id": str(kit['_id']),
+        "kit_name": kit.get('name'),
+        "items": items
+    }
+
 def calculate_epi_status(epi):
     """Calcula status de estoque e validade do EPI"""
     stock_status = 'ok'
@@ -1439,73 +1741,160 @@ def calculate_epi_status(epi):
 async def get_epis(current_user: dict = Depends(require_role('admin', 'gestor', 'seguranca_trabalho', 'almoxarifado'))):
     db = await get_db()
     epis = await db.epis.find({}).to_list(1000)
-    
     result = []
     for e in epis:
-        stock_status, validity_status = calculate_epi_status(e)
-        resp = doc_to_response(e)
-        resp['stock_status'] = stock_status
-        resp['validity_status'] = validity_status
-        result.append(EPIResponse(**resp))
-    
+        result.append(EPIResponse(**(await build_epi_response(db, e))))
     return result
 
 @api_router.post('/epis', response_model=EPIResponse, status_code=status.HTTP_201_CREATED)
 async def create_epi(epi_data: EPICreate, current_user: dict = Depends(require_role('admin', 'gestor', 'seguranca_trabalho'))):
     db = await get_db()
-    
-    # Validar que pelo menos CA ou NBR deve ser preenchido
-    if not epi_data.ca_number and not epi_data.nbr_number:
-        raise HTTPException(status_code=400, detail='É necessário informar o número do CA ou NBR')
-    
-    new_epi = {**epi_data.model_dump(), "created_by": current_user['id'], "created_at": datetime.now(timezone.utc), "updated_at": datetime.now(timezone.utc)}
-    
-    # Converter enum para string se necessário
-    if new_epi.get('replacement_period'):
-        new_epi['replacement_period'] = str(new_epi['replacement_period'].value) if hasattr(new_epi['replacement_period'], 'value') else str(new_epi['replacement_period'])
-    
+    payload = epi_data.model_dump()
+    variations_payload = payload.pop('variations', []) or []
+    category = payload.get('category') or payload.get('type_category')
+    nbr = payload.get('nbr') or payload.get('nbr_number')
+
+    if payload.get('obrigatorio_ca', True):
+        if not variations_payload and not payload.get('ca_number'):
+            raise HTTPException(status_code=400, detail='Cadastre ao menos uma varia??o com CA para este EPI.')
+        if variations_payload and not any(normalize_text(item.get('ca') or item.get('ca_number')) for item in variations_payload):
+            raise HTTPException(status_code=400, detail='Cadastre ao menos uma varia??o com CA para este EPI.')
+
+    now = datetime.now(timezone.utc)
+    new_epi = {
+        'name': payload['name'],
+        'category': category,
+        'type_category': category,
+        'description': payload.get('description'),
+        'obrigatorio_ca': payload.get('obrigatorio_ca', True),
+        'nbr': nbr,
+        'nbr_number': nbr,
+        'possui_variacao_tamanho': payload.get('possui_variacao_tamanho', False),
+        'min_stock': payload.get('min_stock', 0),
+        'max_stock': payload.get('max_stock'),
+        'replacement_period': str(payload['replacement_period'].value) if payload.get('replacement_period') else None,
+        'replacement_days': payload.get('replacement_days'),
+        'created_by': current_user['id'],
+        'created_at': now,
+        'updated_at': now
+    }
     result = await db.epis.insert_one(new_epi)
     new_epi['_id'] = result.inserted_id
-    stock_status, validity_status = calculate_epi_status(new_epi)
-    resp = doc_to_response(new_epi)
-    resp['stock_status'] = stock_status
-    resp['validity_status'] = validity_status
-    return EPIResponse(**resp)
+
+    if not variations_payload and any([
+        normalize_text(payload.get('brand')),
+        normalize_text(payload.get('model')),
+        normalize_text(payload.get('ca_number')),
+        payload.get('current_stock', 0) > 0
+    ]):
+        variations_payload = [payload]
+
+    for raw_variation in variations_payload:
+        supplier_id = raw_variation.get('supplier_id')
+        quantity = raw_variation.get('quantidade_estoque', raw_variation.get('current_stock', 0) or 0)
+        variation = {
+            'epi_id': str(result.inserted_id),
+            'brand': raw_variation.get('marca') or raw_variation.get('brand'),
+            'model': raw_variation.get('modelo') or raw_variation.get('model'),
+            'ca_number': raw_variation.get('ca') or raw_variation.get('ca_number'),
+            'supplier_id': supplier_id,
+            'supplier_name': raw_variation.get('fornecedor') or await get_supplier_name(db, supplier_id),
+            'ca_validity': raw_variation.get('validade_ca') or raw_variation.get('ca_validity'),
+            'size': raw_variation.get('tamanho') or raw_variation.get('size'),
+            'color': raw_variation.get('cor') or raw_variation.get('color'),
+            'current_stock': quantity,
+            'unit_price': raw_variation.get('valor_unitario', raw_variation.get('unit_price')),
+            'purchase_date': raw_variation.get('data_compra') or raw_variation.get('purchase_date'),
+            'batch': raw_variation.get('lote') or raw_variation.get('batch'),
+            'status': raw_variation.get('status') or 'ativo',
+            'qr_code': raw_variation.get('qr_code'),
+            'internal_code': raw_variation.get('internal_code'),
+            'invoice_number': raw_variation.get('invoice_number'),
+            'validity_date': raw_variation.get('validity_date'),
+            'material': raw_variation.get('material'),
+            'technical_standard': raw_variation.get('technical_standard'),
+            'quantity_purchased': raw_variation.get('quantity_purchased', quantity),
+            'created_at': now,
+            'updated_at': now
+        }
+        await db.epi_variations.insert_one(variation)
+
+    await sync_epi_stock_summary(db, str(result.inserted_id))
+    refreshed = await db.epis.find_one({'_id': result.inserted_id})
+    return EPIResponse(**(await build_epi_response(db, refreshed)))
 
 @api_router.get('/epis/{epi_id}', response_model=EPIResponse)
 async def get_epi(epi_id: str, current_user: dict = Depends(require_role('admin', 'gestor', 'seguranca_trabalho', 'almoxarifado'))):
     db = await get_db()
-    epi = await db.epis.find_one({"_id": ObjectId(epi_id)})
+    epi = await db.epis.find_one({'_id': ObjectId(epi_id)})
     if not epi:
-        raise HTTPException(status_code=404, detail='EPI não encontrado')
-    stock_status, validity_status = calculate_epi_status(epi)
-    resp = doc_to_response(epi)
-    resp['stock_status'] = stock_status
-    resp['validity_status'] = validity_status
-    return EPIResponse(**resp)
+        raise HTTPException(status_code=404, detail='EPI n?o encontrado')
+    return EPIResponse(**(await build_epi_response(db, epi)))
 
 @api_router.patch('/epis/{epi_id}', response_model=EPIResponse)
 async def update_epi(epi_id: str, epi_data: EPIUpdate, current_user: dict = Depends(require_role('admin', 'gestor', 'seguranca_trabalho'))):
     db = await get_db()
-    update_data = {k: v for k, v in epi_data.model_dump(exclude_unset=True).items()}
+    existing = await db.epis.find_one({'_id': ObjectId(epi_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail='EPI n?o encontrado')
+
+    update_data = {k: v for k, v in epi_data.model_dump(exclude_unset=True).items() if k != 'variations'}
     update_data['updated_at'] = datetime.now(timezone.utc)
-    
-    # Converter enum para string se necessário
+
+    if 'category' in update_data or 'type_category' in update_data:
+        category = update_data.get('category') or update_data.get('type_category')
+        update_data['category'] = category
+        update_data['type_category'] = category
+    if 'nbr' in update_data or 'nbr_number' in update_data:
+        nbr = update_data.get('nbr') or update_data.get('nbr_number')
+        update_data['nbr'] = nbr
+        update_data['nbr_number'] = nbr
     if update_data.get('replacement_period'):
         update_data['replacement_period'] = str(update_data['replacement_period'].value) if hasattr(update_data['replacement_period'], 'value') else str(update_data['replacement_period'])
-    
-    result = await db.epis.find_one_and_update({"_id": ObjectId(epi_id)}, {"$set": update_data}, return_document=True)
-    if not result:
-        raise HTTPException(status_code=404, detail='EPI não encontrado')
-    stock_status, validity_status = calculate_epi_status(result)
-    resp = doc_to_response(result)
-    resp['stock_status'] = stock_status
-    resp['validity_status'] = validity_status
-    return EPIResponse(**resp)
+
+    await db.epis.update_one({'_id': ObjectId(epi_id)}, {'$set': update_data})
+
+    if epi_data.variations is not None:
+        await db.epi_variations.delete_many({'epi_id': epi_id})
+        now = datetime.now(timezone.utc)
+        for raw_variation in epi_data.variations:
+            supplier_id = raw_variation.get('supplier_id')
+            quantity = raw_variation.get('quantidade_estoque', raw_variation.get('current_stock', 0) or 0)
+            variation = {
+                'epi_id': epi_id,
+                'brand': raw_variation.get('marca') or raw_variation.get('brand'),
+                'model': raw_variation.get('modelo') or raw_variation.get('model'),
+                'ca_number': raw_variation.get('ca') or raw_variation.get('ca_number'),
+                'supplier_id': supplier_id,
+                'supplier_name': raw_variation.get('fornecedor') or await get_supplier_name(db, supplier_id),
+                'ca_validity': raw_variation.get('validade_ca') or raw_variation.get('ca_validity'),
+                'size': raw_variation.get('tamanho') or raw_variation.get('size'),
+                'color': raw_variation.get('cor') or raw_variation.get('color'),
+                'current_stock': quantity,
+                'unit_price': raw_variation.get('valor_unitario', raw_variation.get('unit_price')),
+                'purchase_date': raw_variation.get('data_compra') or raw_variation.get('purchase_date'),
+                'batch': raw_variation.get('lote') or raw_variation.get('batch'),
+                'status': raw_variation.get('status') or 'ativo',
+                'qr_code': raw_variation.get('qr_code'),
+                'internal_code': raw_variation.get('internal_code'),
+                'invoice_number': raw_variation.get('invoice_number'),
+                'validity_date': raw_variation.get('validity_date'),
+                'material': raw_variation.get('material'),
+                'technical_standard': raw_variation.get('technical_standard'),
+                'quantity_purchased': raw_variation.get('quantity_purchased', quantity),
+                'created_at': now,
+                'updated_at': now
+            }
+            await db.epi_variations.insert_one(variation)
+
+    await sync_epi_stock_summary(db, epi_id)
+    refreshed = await db.epis.find_one({'_id': ObjectId(epi_id)})
+    return EPIResponse(**(await build_epi_response(db, refreshed)))
 
 @api_router.delete('/epis/{epi_id}')
 async def delete_epi(epi_id: str, current_user: dict = Depends(require_role('admin'))):
     db = await get_db()
+    await db.epi_variations.delete_many({"epi_id": epi_id})
     result = await db.epis.delete_one({"_id": ObjectId(epi_id)})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail='EPI não encontrado')
@@ -1517,54 +1906,44 @@ async def delete_epi(epi_id: str, current_user: dict = Depends(require_role('adm
 async def get_kits(current_user: dict = Depends(require_role('admin', 'gestor', 'seguranca_trabalho', 'almoxarifado'))):
     db = await get_db()
     kits = await db.kits.find({}).to_list(1000)
-    return [KitResponse(**doc_to_response(k)) for k in kits]
+    return [KitResponse(**(await build_kit_response(db, k))) for k in kits]
 
 @api_router.post('/kits', response_model=KitResponse, status_code=status.HTTP_201_CREATED)
 async def create_kit(kit_data: KitCreate, current_user: dict = Depends(require_role('admin', 'gestor', 'seguranca_trabalho'))):
     db = await get_db()
-    
-    # Buscar detalhes dos EPIs para armazenar nome e descrição
-    items_with_details = []
-    for item in kit_data.items:
-        if item.epi_id:
-            epi = await db.epis.find_one({"_id": ObjectId(item.epi_id)})
-            if epi:
-                items_with_details.append({
-                    "epi_id": item.epi_id,
-                    "name": epi['name'],
-                    "type_category": epi.get('type_category', ''),
-                    "ca_number": epi.get('ca_number', ''),
-                    "nbr_number": epi.get('nbr_number', ''),
-                    "size": epi.get('size', ''),
-                    "quantity": item.quantity
-                })
-    
+    items = [
+        {
+            'epi_id': item.epi_id,
+            'quantity': item.quantity
+        }
+        for item in kit_data.items
+        if item.epi_id
+    ]
     new_kit = {
-        "name": kit_data.name,
-        "description": kit_data.description,
-        "sector": kit_data.sector,
-        "is_mandatory": kit_data.is_mandatory,
-        "items": items_with_details,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc)
+        'name': kit_data.name,
+        'description': kit_data.description,
+        'sector': kit_data.sector,
+        'is_mandatory': kit_data.is_mandatory,
+        'items': items,
+        'created_at': datetime.now(timezone.utc),
+        'updated_at': datetime.now(timezone.utc)
     }
     result = await db.kits.insert_one(new_kit)
     new_kit['_id'] = result.inserted_id
-    return KitResponse(**doc_to_response(new_kit))
+    return KitResponse(**(await build_kit_response(db, new_kit)))
 
 @api_router.get('/kits/{kit_id}', response_model=KitResponse)
 async def get_kit(kit_id: str, current_user: dict = Depends(get_current_user)):
     db = await get_db()
-    kit = await db.kits.find_one({"_id": ObjectId(kit_id)})
+    kit = await db.kits.find_one({'_id': ObjectId(kit_id)})
     if not kit:
-        raise HTTPException(status_code=404, detail='Kit não encontrado')
-    return KitResponse(**doc_to_response(kit))
+        raise HTTPException(status_code=404, detail='Kit n?o encontrado')
+    return KitResponse(**(await build_kit_response(db, kit)))
 
 @api_router.patch('/kits/{kit_id}', response_model=KitResponse)
 async def update_kit(kit_id: str, kit_data: KitUpdate, current_user: dict = Depends(require_role('admin', 'gestor', 'seguranca_trabalho'))):
     db = await get_db()
     update_data = {}
-    
     if kit_data.name is not None:
         update_data['name'] = kit_data.name
     if kit_data.description is not None:
@@ -1573,32 +1952,20 @@ async def update_kit(kit_id: str, kit_data: KitUpdate, current_user: dict = Depe
         update_data['sector'] = kit_data.sector
     if kit_data.is_mandatory is not None:
         update_data['is_mandatory'] = kit_data.is_mandatory
-    
     if kit_data.items is not None:
-        items_with_details = []
-        for item in kit_data.items:
-            if item.epi_id:
-                epi = await db.epis.find_one({"_id": ObjectId(item.epi_id)})
-                if epi:
-                    items_with_details.append({
-                        "epi_id": item.epi_id,
-                        "name": epi['name'],
-                        "type_category": epi.get('type_category', ''),
-                        "ca_number": epi.get('ca_number', ''),
-                        "nbr_number": epi.get('nbr_number', ''),
-                        "size": epi.get('size', ''),
-                        "quantity": item.quantity
-                    })
-        update_data['items'] = items_with_details
-    
+        update_data['items'] = [
+            {
+                'epi_id': item.epi_id,
+                'quantity': item.quantity
+            }
+            for item in kit_data.items
+            if item.epi_id
+        ]
     update_data['updated_at'] = datetime.now(timezone.utc)
-    
-    result = await db.kits.find_one_and_update(
-        {"_id": ObjectId(kit_id)}, {"$set": update_data}, return_document=True
-    )
+    result = await db.kits.find_one_and_update({'_id': ObjectId(kit_id)}, {'$set': update_data}, return_document=True)
     if not result:
-        raise HTTPException(status_code=404, detail='Kit não encontrado')
-    return KitResponse(**doc_to_response(result))
+        raise HTTPException(status_code=404, detail='Kit n?o encontrado')
+    return KitResponse(**(await build_kit_response(db, result)))
 
 @api_router.delete('/kits/{kit_id}')
 async def delete_kit(kit_id: str, current_user: dict = Depends(require_role('admin'))):
@@ -1613,68 +1980,82 @@ async def delete_kit(kit_id: str, current_user: dict = Depends(require_role('adm
 @api_router.post('/deliveries', response_model=DeliveryResponse, status_code=status.HTTP_201_CREATED)
 async def create_delivery(delivery_data: DeliveryCreate, current_user: dict = Depends(get_current_user)):
     if not can_deliver_epi(current_user['role']):
-        raise HTTPException(status_code=403, detail='Sem permissão para realizar entregas')
-    
+        raise HTTPException(status_code=403, detail='Sem permiss?o para realizar entregas')
+
     db = await get_db()
-    
-    employee = await db.employees.find_one({"_id": ObjectId(delivery_data.employee_id)})
+    employee = await db.employees.find_one({'_id': ObjectId(delivery_data.employee_id)})
     if not employee:
-        raise HTTPException(status_code=404, detail='Colaborador não encontrado')
-    
-    # Verificar se colaborador tem foto cadastrada
+        raise HTTPException(status_code=404, detail='Colaborador n?o encontrado')
     if not employee.get('photo_path'):
-        raise HTTPException(status_code=400, detail='Colaborador não possui foto cadastrada. Procure o RH para cadastrar.')
-    
+        raise HTTPException(status_code=400, detail='Colaborador n?o possui foto cadastrada. Procure o RH para cadastrar.')
+
     items_list = []
     for item in delivery_data.items:
         item_dict = item.model_dump()
-        
         if item.epi_id:
-            epi = await db.epis.find_one({"_id": ObjectId(item.epi_id)})
-            if epi:
-                item_dict['epi_name'] = epi['name']
-                item_dict['ca_number'] = epi.get('ca_number', '')
-                stock_change = -item.quantity if not delivery_data.is_return else item.quantity
-                await db.epis.update_one({"_id": ObjectId(item.epi_id)}, {"$inc": {"current_stock": stock_change}})
-                
-                movement = {
-                    "movement_type": "return" if delivery_data.is_return else "delivery",
-                    "epi_id": item.epi_id,
-                    "quantity": item.quantity if delivery_data.is_return else -item.quantity,
-                    "employee_id": delivery_data.employee_id,
-                    "created_by": current_user['id'],
-                    "created_at": datetime.now(timezone.utc)
-                }
-                await db.stock_movements.insert_one(movement)
-        
-        if item.kit_id:
-            kit = await db.kits.find_one({"_id": ObjectId(item.kit_id)})
-            if kit:
-                item_dict['kit_name'] = kit['name']
-                # Processar itens do kit
-                for kit_item in kit.get('items', []):
-                    if kit_item.get('epi_id'):
-                        stock_change = -kit_item['quantity'] if not delivery_data.is_return else kit_item['quantity']
-                        await db.epis.update_one({"_id": ObjectId(kit_item['epi_id'])}, {"$inc": {"current_stock": stock_change}})
-        
+            epi = await db.epis.find_one({'_id': ObjectId(item.epi_id)})
+            if not epi:
+                raise HTTPException(status_code=404, detail='EPI n?o encontrado para entrega.')
+
+            variation = await resolve_epi_variation(
+                db,
+                epi,
+                employee=employee,
+                requested_size=item.size,
+                requested_variation_id=item.epi_variation_id,
+                require_stock=not delivery_data.is_return
+            )
+            if not variation:
+                raise HTTPException(status_code=400, detail='Sem estoque dispon?vel para tamanho solicitado.')
+
+            if not delivery_data.is_return and (variation.get('current_stock', 0) or 0) < item.quantity:
+                raise HTTPException(status_code=400, detail='Sem estoque dispon?vel para tamanho solicitado.')
+
+            stock_change = item.quantity if delivery_data.is_return else -item.quantity
+            await db.epi_variations.update_one({'_id': variation['_id']}, {'$inc': {'current_stock': stock_change}})
+            await sync_epi_stock_summary(db, item.epi_id)
+
+            movement = {
+                'movement_type': 'return' if delivery_data.is_return else 'delivery',
+                'epi_id': item.epi_id,
+                'epi_variation_id': str(variation['_id']),
+                'quantity': item.quantity if delivery_data.is_return else -item.quantity,
+                'employee_id': delivery_data.employee_id,
+                'created_by': current_user['id'],
+                'created_at': datetime.now(timezone.utc)
+            }
+            await db.stock_movements.insert_one(movement)
+
+            item_dict.update({
+                'epi_name': epi.get('name'),
+                'epi_variation_id': str(variation['_id']),
+                'brand': variation.get('brand'),
+                'model': variation.get('model'),
+                'size': variation.get('size') or item.size,
+                'batch': variation.get('batch') or item.batch,
+                'qr_code': variation.get('qr_code') or item.qr_code,
+                'ca_number': variation.get('ca_number'),
+                'supplier_name': variation.get('supplier_name')
+            })
+
         items_list.append(item_dict)
-    
+
     new_delivery = {
-        "employee_id": delivery_data.employee_id,
-        "employee_name": employee['full_name'],
-        "delivery_type": delivery_data.delivery_type,
-        "is_return": delivery_data.is_return,
-        "facial_match_score": delivery_data.facial_match_score,
-        "facial_photo_path": delivery_data.facial_photo_path,
-        "facial_validation_status": delivery_data.facial_validation_status,
-        "facial_validation_message": delivery_data.facial_validation_message,
-        "facial_liveness_status": delivery_data.facial_liveness_status,
-        "facial_second_capture_used": delivery_data.facial_second_capture_used,
-        "notes": delivery_data.notes,
-        "items": items_list,
-        "delivered_by": current_user['id'],
-        "delivered_by_name": current_user['username'],
-        "created_at": datetime.now(timezone.utc)
+        'employee_id': delivery_data.employee_id,
+        'employee_name': employee['full_name'],
+        'delivery_type': delivery_data.delivery_type,
+        'is_return': delivery_data.is_return,
+        'facial_match_score': delivery_data.facial_match_score,
+        'facial_photo_path': delivery_data.facial_photo_path,
+        'facial_validation_status': delivery_data.facial_validation_status,
+        'facial_validation_message': delivery_data.facial_validation_message,
+        'facial_liveness_status': delivery_data.facial_liveness_status,
+        'facial_second_capture_used': delivery_data.facial_second_capture_used,
+        'notes': delivery_data.notes,
+        'items': items_list,
+        'delivered_by': current_user['id'],
+        'delivered_by_name': current_user['username'],
+        'created_at': datetime.now(timezone.utc)
     }
     result = await db.deliveries.insert_one(new_delivery)
     new_delivery['_id'] = result.inserted_id
@@ -1869,10 +2250,11 @@ async def get_pending_epi_alerts(current_user: dict = Depends(get_current_user))
         for kit_item in kit.get('items', []):
             epi_id = kit_item.get('epi_id')
             if epi_id and epi_id not in delivered_epi_ids:
+                epi_doc = await db.epis.find_one({'_id': ObjectId(epi_id)})
                 missing_epis.append({
                     'epi_id': epi_id,
-                    'name': kit_item.get('name', 'EPI'),
-                    'ca_number': kit_item.get('ca_number', ''),
+                    'name': kit_item.get('name') or (epi_doc.get('name') if epi_doc else 'EPI'),
+                    'ca_number': kit_item.get('ca_number', '') or (epi_doc.get('ca_number', '') if epi_doc else ''),
                     'quantity_required': kit_item.get('quantity', 1)
                 })
         
@@ -2091,6 +2473,34 @@ async def get_employee_alerts(employee_id: str, current_user: dict = Depends(get
 
 # ===================== SETOR-KIT VINCULAÇÃO =====================
 
+@api_router.get('/employees/{employee_id}/delivery-suggestions', response_model=DeliverySuggestionResponse)
+async def get_delivery_suggestions(employee_id: str, current_user: dict = Depends(get_current_user), kit_id: Optional[str] = None):
+    db = await get_db()
+    employee = await db.employees.find_one({"_id": ObjectId(employee_id)})
+    if not employee:
+        raise HTTPException(status_code=404, detail='Colaborador nÃ£o encontrado')
+
+    kit = None
+    if kit_id:
+        kit = await db.kits.find_one({"_id": ObjectId(kit_id)})
+    elif employee.get('department'):
+        kit = await db.kits.find_one({
+            "sector": {"$regex": f"^{employee.get('department')}$", "$options": "i"},
+            "is_mandatory": {"$ne": False}
+        })
+
+    if not kit:
+        return DeliverySuggestionResponse(
+            employee_id=employee_id,
+            employee_name=employee.get('full_name', ''),
+            department=employee.get('department'),
+            kit_id=None,
+            kit_name=None,
+            items=[]
+        )
+
+    return DeliverySuggestionResponse(**(await build_delivery_suggestions_for_kit(db, employee, kit)))
+
 @api_router.get('/kits/by-sector/{sector_name}')
 async def get_kit_by_sector(sector_name: str, current_user: dict = Depends(get_current_user)):
     """Retorna o kit obrigatório vinculado a um setor"""
@@ -2103,8 +2513,8 @@ async def get_kit_by_sector(sector_name: str, current_user: dict = Depends(get_c
     
     if not kit:
         return None
-    
-    return KitResponse(**doc_to_response(kit))
+
+    return KitResponse(**(await build_kit_response(db, kit)))
 
 @api_router.get('/sectors/list')
 async def get_sectors_list(current_user: dict = Depends(get_current_user)):
