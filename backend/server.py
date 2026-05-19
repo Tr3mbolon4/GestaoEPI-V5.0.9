@@ -100,7 +100,77 @@ def format_facial_template_response(doc):
         "pose_label": doc.get("pose_label"),
         "quality_score": doc.get("quality_score"),
         "detection_score": doc.get("detection_score"),
+        "created_by": doc.get("created_by"),
+        "created_by_name": doc.get("created_by_name"),
         "created_at": doc.get("created_at")
+    }
+
+def biometric_quality_label(quality_score: Optional[float]) -> str:
+    score = float(quality_score or 0)
+    if score >= 0.85:
+        return "Excelente"
+    if score >= 0.70:
+        return "Boa"
+    if score >= 0.50:
+        return "Regular"
+    return "Ruim"
+
+def build_biometric_summary(employee: dict, templates: List[dict]) -> dict:
+    valid_templates = [
+        template for template in templates
+        if face_recognition_service.is_descriptor_compatible(template.get("descriptor"))
+    ]
+    count = len(valid_templates)
+    if count >= 3:
+        status_key = "registered"
+        status_label = "Cadastrada"
+    elif count > 0:
+        status_key = "incomplete"
+        status_label = "Incompleta"
+    else:
+        status_key = "missing"
+        status_label = "Nao cadastrada"
+
+    dates = [template.get("created_at") for template in valid_templates if template.get("created_at")]
+    quality_scores = [float(template.get("quality_score") or 0) for template in valid_templates]
+    avg_quality = round(sum(quality_scores) / len(quality_scores), 4) if quality_scores else 0
+    latest_template = sorted(
+        valid_templates,
+        key=lambda template: template.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True
+    )[0] if valid_templates else None
+
+    return {
+        "status": status_key,
+        "status_label": status_label,
+        "templates_count": count,
+        "total_templates_count": len(templates),
+        "first_enrolled_at": min(dates) if dates else None,
+        "last_updated_at": max(dates) if dates else None,
+        "created_by": latest_template.get("created_by") if latest_template else None,
+        "created_by_name": latest_template.get("created_by_name") if latest_template else None,
+        "model": "InsightFace",
+        "has_consent": employee.get("facial_consent", False),
+        "consent_date": employee.get("facial_consent_date"),
+        "quality_score": avg_quality,
+        "quality_label": biometric_quality_label(avg_quality),
+    }
+
+async def get_biometric_summaries(db, employees: List[dict]) -> dict:
+    employee_ids = [str(employee["_id"]) for employee in employees]
+    object_ids = [employee["_id"] for employee in employees]
+    templates = await db.facial_templates.find({
+        "employee_id": {"$in": employee_ids + object_ids}
+    }).to_list(10000)
+    templates_by_employee = {}
+    for template in templates:
+        templates_by_employee.setdefault(str(template.get("employee_id")), []).append(template)
+    return {
+        str(employee["_id"]): build_biometric_summary(
+            employee,
+            templates_by_employee.get(str(employee["_id"]), [])
+        )
+        for employee in employees
     }
 
 def check_password_expired(user):
@@ -425,12 +495,29 @@ async def get_employees(current_user: dict = Depends(get_current_user), search: 
         query["company_id"] = company_id
     
     employees = await db.employees.find(query).to_list(1000)
+    biometric_summaries = await get_biometric_summaries(db, employees)
     
     # Perfis que não podem ver dados sensíveis
     if not can_view_sensitive_data(current_user['role']):
-        return [EmployeePublicResponse(**doc_to_response(e)) for e in employees]
+        result = []
+        for employee in employees:
+            item = EmployeePublicResponse(**doc_to_response(employee)).model_dump()
+            summary = biometric_summaries.get(str(employee['_id']))
+            item["biometric"] = summary
+            item["biometric_status"] = summary["status"] if summary else "missing"
+            item["biometric_templates_count"] = summary["templates_count"] if summary else 0
+            result.append(item)
+        return result
     
-    return [EmployeeResponse(**doc_to_response(e)) for e in employees]
+    result = []
+    for employee in employees:
+        item = EmployeeResponse(**doc_to_response(employee)).model_dump()
+        summary = biometric_summaries.get(str(employee['_id']))
+        item["biometric"] = summary
+        item["biometric_status"] = summary["status"] if summary else "missing"
+        item["biometric_templates_count"] = summary["templates_count"] if summary else 0
+        result.append(item)
+    return result
 
 @api_router.post('/employees', response_model=EmployeeResponse, status_code=status.HTTP_201_CREATED)
 async def create_employee(employee_data: EmployeeCreate, current_user: dict = Depends(get_current_user)):
@@ -453,11 +540,23 @@ async def get_employee(employee_id: str, current_user: dict = Depends(get_curren
     employee = await db.employees.find_one({"_id": ObjectId(employee_id)})
     if not employee:
         raise HTTPException(status_code=404, detail='Colaborador não encontrado')
-    
+    templates = await db.facial_templates.find({
+        "employee_id": {"$in": [employee_id, ObjectId(employee_id)]}
+    }).to_list(100)
+    biometric_summary = build_biometric_summary(employee, templates)
+
     if not can_view_sensitive_data(current_user['role']):
-        return EmployeePublicResponse(**doc_to_response(employee))
-    
-    return EmployeeResponse(**doc_to_response(employee))
+        item = EmployeePublicResponse(**doc_to_response(employee)).model_dump()
+        item["biometric"] = biometric_summary
+        item["biometric_status"] = biometric_summary["status"]
+        item["biometric_templates_count"] = biometric_summary["templates_count"]
+        return item
+
+    item = EmployeeResponse(**doc_to_response(employee)).model_dump()
+    item["biometric"] = biometric_summary
+    item["biometric_status"] = biometric_summary["status"]
+    item["biometric_templates_count"] = biometric_summary["templates_count"]
+    return item
 
 @api_router.patch('/employees/{employee_id}', response_model=EmployeeResponse)
 async def update_employee(employee_id: str, employee_data: EmployeeUpdate, current_user: dict = Depends(get_current_user)):
@@ -971,6 +1070,61 @@ async def get_facial_templates(employee_id: str, current_user: dict = Depends(ge
     }).to_list(100)
     return [format_facial_template_response(t) for t in templates]
 
+@api_router.get('/employees/{employee_id}/biometric-summary')
+async def get_employee_biometric_summary(employee_id: str, current_user: dict = Depends(get_current_user)):
+    db = await get_db()
+    employee = await db.employees.find_one({"_id": ObjectId(employee_id)})
+    if not employee:
+        raise HTTPException(status_code=404, detail='Colaborador nao encontrado')
+    templates = await db.facial_templates.find({
+        "employee_id": {"$in": [employee_id, ObjectId(employee_id)]}
+    }).to_list(100)
+    return build_biometric_summary(employee, templates)
+
+@api_router.delete('/employees/{employee_id}/facial-templates')
+async def delete_all_facial_templates(employee_id: str, current_user: dict = Depends(get_current_user)):
+    if not can_manage_employees(current_user['role']):
+        raise HTTPException(status_code=403, detail='Sem permissao')
+    db = await get_db()
+    result = await db.facial_templates.delete_many({
+        "employee_id": {"$in": [employee_id, ObjectId(employee_id)]}
+    })
+    await face_recognition_service.refresh_employee_cache(db, employee_id)
+    return {'message': 'Biometria facial excluida', 'deleted_count': result.deleted_count}
+
+@api_router.post('/employees/{employee_id}/facial-templates/reprocess')
+async def reprocess_facial_templates(employee_id: str, current_user: dict = Depends(get_current_user)):
+    if not can_manage_employees(current_user['role']):
+        raise HTTPException(status_code=403, detail='Sem permissao')
+    db = await get_db()
+    await face_recognition_service.refresh_employee_cache(db, employee_id)
+    employee = await db.employees.find_one({"_id": ObjectId(employee_id)})
+    templates = await db.facial_templates.find({
+        "employee_id": {"$in": [employee_id, ObjectId(employee_id)]}
+    }).to_list(100)
+    return {
+        'message': 'Templates reprocessados no cache facial',
+        'summary': build_biometric_summary(employee, templates) if employee else None
+    }
+
+@api_router.get('/biometric/dashboard')
+async def get_biometric_dashboard(current_user: dict = Depends(get_current_user)):
+    db = await get_db()
+    employees = await db.employees.find({"status": "active"}).to_list(5000)
+    summaries = await get_biometric_summaries(db, employees)
+    total = len(employees)
+    registered = sum(1 for item in summaries.values() if item["status"] == "registered")
+    incomplete = sum(1 for item in summaries.values() if item["status"] == "incomplete")
+    missing = total - registered - incomplete
+    coverage = round((registered / total) * 100, 1) if total else 0
+    return {
+        "total_employees": total,
+        "registered": registered,
+        "missing": missing,
+        "incomplete": incomplete,
+        "coverage_percent": coverage
+    }
+
 # Endpoint otimizado para buscar TODOS os templates de uma vez
 @api_router.get('/facial-templates/all')
 async def get_all_facial_templates(current_user: dict = Depends(get_current_user)):
@@ -1244,6 +1398,8 @@ async def create_facial_template(employee_id: str, template_data: FacialTemplate
         "pose_label": template_data.pose_label,
         "quality_score": template_data.quality_score,
         "detection_score": template_data.detection_score,
+        "created_by": current_user.get("id"),
+        "created_by_name": current_user.get("username"),
         "created_at": datetime.now(timezone.utc)
     }
     result = await db.facial_templates.insert_one(new_template)
@@ -1257,6 +1413,8 @@ async def create_facial_template(employee_id: str, template_data: FacialTemplate
         "pose_label": template_data.pose_label,
         "quality_score": template_data.quality_score,
         "detection_score": template_data.detection_score,
+        "created_by": new_template.get("created_by"),
+        "created_by_name": new_template.get("created_by_name"),
         "created_at": new_template["created_at"].isoformat()
     }
 
@@ -1307,6 +1465,8 @@ async def facial_enroll(
         "pose_label": enroll_result.get('pose_label') or payload.pose_label or 'frontal',
         "quality_score": enroll_result.get('quality_score'),
         "detection_score": enroll_result.get('detection_score'),
+        "created_by": current_user.get("id"),
+        "created_by_name": current_user.get("username"),
         "created_at": datetime.now(timezone.utc)
     }
     result = await db.facial_templates.insert_one(new_template)
@@ -1335,6 +1495,81 @@ async def facial_identify_fast(
 
     result = face_recognition_service.identify_fast(payload.image_base64)
     return FacialIdentifyFastResponse(**result)
+
+@api_router.post('/facial/identify-burst', response_model=FacialIdentifyFastResponse)
+async def facial_identify_burst(
+    payload: FacialIdentifyBurstRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    if not can_deliver_epi(current_user['role']):
+        raise HTTPException(status_code=403, detail='Sem permissao para reconhecimento facial de entrega')
+
+    if not face_recognition_service.available:
+        raise HTTPException(status_code=503, detail='Servico facial backend indisponivel')
+
+    frames = [image for image in payload.images_base64[:5] if image]
+    if not frames:
+        return FacialIdentifyFastResponse(
+            status='retry',
+            message='Nenhuma imagem utilizavel recebida. Nova captura automatica em andamento.',
+            employee_id=None,
+            employee_name=None,
+            similarity_score=0.0,
+            detection_confidence=0.0,
+            liveness_required=False
+        )
+
+    results = [face_recognition_service.identify_fast(image) for image in frames]
+    approved = [item for item in results if item.get('status') == 'approved' and item.get('employee_id')]
+    if approved:
+        best = max(approved, key=lambda item: item.get('similarity_score', 0))
+        best['message'] = f"{best.get('employee_name')} identificado automaticamente."
+        best['liveness_required'] = False
+        return FacialIdentifyFastResponse(**best)
+
+    grouped = {}
+    for item in results:
+        employee_id = item.get('employee_id')
+        if not employee_id:
+            continue
+        grouped.setdefault(employee_id, []).append(item)
+
+    for employee_results in grouped.values():
+        if len(employee_results) < 2:
+            continue
+        scores = [item.get('similarity_score', 0) for item in employee_results]
+        average_score = sum(scores) / len(scores)
+        best = max(employee_results, key=lambda item: item.get('similarity_score', 0))
+        if average_score >= 0.70 and max(scores) >= 0.74:
+            best.update({
+                'status': 'approved',
+                'similarity_score': round(float(average_score), 4),
+                'message': f"{best.get('employee_name')} confirmado por multiplos frames.",
+                'liveness_required': False
+            })
+            return FacialIdentifyFastResponse(**best)
+
+    usable = [item for item in results if item.get('detection_confidence', 0) > 0]
+    best_retry = max(usable, key=lambda item: item.get('similarity_score', 0), default=None)
+    if best_retry:
+        best_retry.update({
+            'status': 'retry',
+            'employee_id': None if best_retry.get('similarity_score', 0) < 0.70 else best_retry.get('employee_id'),
+            'employee_name': None if best_retry.get('similarity_score', 0) < 0.70 else best_retry.get('employee_name'),
+            'message': 'Procurando colaborador automaticamente.',
+            'liveness_required': False
+        })
+        return FacialIdentifyFastResponse(**best_retry)
+
+    return FacialIdentifyFastResponse(
+        status='retry',
+        message='Nenhum frame utilizavel. Nova captura automatica em andamento.',
+        employee_id=None,
+        employee_name=None,
+        similarity_score=0.0,
+        detection_confidence=0.0,
+        liveness_required=False
+    )
 
 @api_router.post('/facial/liveness-check', response_model=FacialLivenessResponse)
 async def facial_liveness_check(
@@ -2602,6 +2837,12 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
     active_employees = await db.employees.count_documents({"status": "active"})
     total_epis = await db.epis.count_documents({})
     low_stock_count = await db.epis.count_documents({"$expr": {"$lte": ["$current_stock", "$min_stock"]}})
+    active_employee_docs = await db.employees.find({"status": "active"}).to_list(5000)
+    biometric_summaries = await get_biometric_summaries(db, active_employee_docs)
+    biometric_registered = sum(1 for item in biometric_summaries.values() if item["status"] == "registered")
+    biometric_incomplete = sum(1 for item in biometric_summaries.values() if item["status"] == "incomplete")
+    biometric_missing = active_employees - biometric_registered - biometric_incomplete
+    biometric_coverage = round((biometric_registered / active_employees) * 100, 1) if active_employees else 0
     
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
     recent_deliveries = await db.deliveries.count_documents({
@@ -2649,7 +2890,12 @@ async def get_dashboard_stats(current_user: dict = Depends(get_current_user)):
         'expiring_epis': expiring_count,
         'pending_epi_alerts': pending_epi_alerts,
         'replacement_due_alerts': replacement_due_alerts,
-        'total_alerts': pending_epi_alerts + replacement_due_alerts
+        'total_alerts': pending_epi_alerts + replacement_due_alerts,
+        'biometric_total_employees': active_employees,
+        'biometric_registered': biometric_registered,
+        'biometric_missing': biometric_missing,
+        'biometric_incomplete': biometric_incomplete,
+        'biometric_coverage_percent': biometric_coverage
     }
 
 # ===================== AUTENTICAÇÃO DE FICHA EPI =====================

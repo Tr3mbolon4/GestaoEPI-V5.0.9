@@ -38,6 +38,28 @@ const POSE_OPTIONS = [
 ];
 
 const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
+const formatDateTime = (value) => value ? new Date(value).toLocaleString('pt-BR') : '-';
+const getBiometricSummary = (colaborador, templates, hasConsent) => {
+  const backendSummary = colaborador?.biometric;
+  if (backendSummary) return backendSummary;
+  const count = templates?.length || 0;
+  return {
+    status: count >= 3 ? 'registered' : count > 0 ? 'incomplete' : 'missing',
+    status_label: count >= 3 ? 'Cadastrada' : count > 0 ? 'Incompleta' : 'Nao cadastrada',
+    templates_count: count,
+    first_enrolled_at: templates?.[0]?.created_at,
+    last_updated_at: templates?.[count - 1]?.created_at,
+    created_by_name: templates?.[count - 1]?.created_by_name,
+    model: 'InsightFace',
+    has_consent: hasConsent,
+    quality_label: 'Regular'
+  };
+};
+const getBiometricBadgeClass = (status) => {
+  if (status === 'registered') return 'bg-emerald-100 text-emerald-700 border-emerald-200';
+  if (status === 'incomplete') return 'bg-amber-100 text-amber-700 border-amber-200';
+  return 'bg-red-100 text-red-700 border-red-200';
+};
 
 export default function ColaboradorDetalhes() {
   const { id } = useParams();
@@ -57,6 +79,7 @@ export default function ColaboradorDetalhes() {
   
   // Estados para biometria facial
   const [facialTemplates, setFacialTemplates] = useState([]);
+  const [biometricSummary, setBiometricSummary] = useState(null);
   const [webcamActive, setWebcamActive] = useState(false);  // Controla visibilidade via CSS
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [capturingFace, setCapturingFace] = useState(false);
@@ -199,6 +222,7 @@ export default function ColaboradorDetalhes() {
     try {
       const res = await axios.get(`${API}/employees/${id}/facial-templates`, { headers: getAuthHeader() });
       setFacialTemplates(res.data);
+      setBiometricSummary(getBiometricSummary(colaborador, res.data, hasConsent));
     } catch (error) {
       console.error('Erro ao buscar templates:', error);
     }
@@ -218,6 +242,7 @@ export default function ColaboradorDetalhes() {
       setHistorico(deliveriesRes.data);
       setFacialTemplates(templatesRes.data);
       setHasConsent(consentRes.data.has_consent || colabRes.data.facial_consent || false);
+      setBiometricSummary(colabRes.data.biometric || getBiometricSummary(colabRes.data, templatesRes.data, consentRes.data.has_consent || colabRes.data.facial_consent || false));
       setEmployeeAlerts(alertsRes.data);
       
       // Calcular itens em uso
@@ -633,6 +658,37 @@ export default function ColaboradorDetalhes() {
     } catch (error) {
       toast.error('Erro ao excluir template');
     }
+  };
+
+  const deleteAllFacialTemplates = async () => {
+    if (!window.confirm('Excluir toda a biometria facial deste colaborador?')) return;
+
+    try {
+      await axios.delete(`${API}/employees/${id}/facial-templates`, { headers: getAuthHeader() });
+      setFacialTemplates([]);
+      setBiometricSummary(getBiometricSummary(colaborador, [], hasConsent));
+      toast.success('Biometria facial excluida');
+    } catch (error) {
+      toast.error('Erro ao excluir biometria');
+    }
+  };
+
+  const reprocessFacialTemplates = async () => {
+    try {
+      const response = await axios.post(`${API}/employees/${id}/facial-templates/reprocess`, {}, { headers: getAuthHeader() });
+      if (response.data?.summary) {
+        setBiometricSummary(response.data.summary);
+      }
+      toast.success('Templates reprocessados');
+      fetchFacialTemplates();
+    } catch (error) {
+      toast.error('Erro ao reprocessar templates');
+    }
+  };
+
+  const startBiometricUpdate = () => {
+    setActiveTab('biometria');
+    setWebcamActive(true);
   };
   
   // Upload de foto do colaborador
@@ -1316,6 +1372,65 @@ export default function ColaboradorDetalhes() {
         {/* EPIs em Uso */}
         {activeTab === 'resumo' && (
           <div className="space-y-6">
+            {biometricSummary && (
+              <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-6">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4 mb-5">
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                      <ScanFace className="w-5 h-5 text-blue-600" />
+                      Biometria Facial
+                    </h3>
+                    <p className="text-sm text-slate-500 mt-1">Controle visual dos templates faciais do colaborador</p>
+                  </div>
+                  <span className={`inline-flex w-fit items-center rounded-full border px-3 py-1 text-sm font-semibold ${getBiometricBadgeClass(biometricSummary.status)}`}>
+                    {biometricSummary.status_label}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mb-5">
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-medium uppercase text-slate-500">Templates</p>
+                    <p className="text-xl font-bold text-slate-900 font-mono">{biometricSummary.templates_count || 0}</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-medium uppercase text-slate-500">Ultima atualizacao</p>
+                    <p className="text-sm font-medium text-slate-800">{formatDateTime(biometricSummary.last_updated_at)}</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-medium uppercase text-slate-500">Qualidade</p>
+                    <p className="text-sm font-bold text-slate-900">{biometricSummary.quality_label || 'Regular'}</p>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-medium uppercase text-slate-500">Consentimento LGPD</p>
+                    <p className={`text-sm font-bold ${biometricSummary.has_consent ? 'text-emerald-700' : 'text-red-700'}`}>
+                      {biometricSummary.has_consent ? 'Registrado' : 'Pendente'}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm text-slate-600 mb-5">
+                  <p><span className="font-medium text-slate-800">Primeiro cadastro:</span> {formatDateTime(biometricSummary.first_enrolled_at)}</p>
+                  <p><span className="font-medium text-slate-800">Cadastrado por:</span> {biometricSummary.created_by_name || '-'}</p>
+                  <p><span className="font-medium text-slate-800">Modelo:</span> {biometricSummary.model || 'InsightFace'}</p>
+                  <p><span className="font-medium text-slate-800">Score medio:</span> {biometricSummary.quality_score ? `${Math.round(biometricSummary.quality_score * 100)}%` : '-'}</p>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button type="button" onClick={startBiometricUpdate} className="bg-emerald-500 hover:bg-emerald-600">
+                    <ScanFace className="w-4 h-4 mr-2" />
+                    {biometricSummary.templates_count > 0 ? 'Atualizar biometria' : 'Cadastrar biometria'}
+                  </Button>
+                  <Button type="button" variant="outline" onClick={reprocessFacialTemplates} disabled={!biometricSummary.templates_count}>
+                    Reprocessar templates
+                  </Button>
+                  <Button type="button" variant="outline" onClick={deleteAllFacialTemplates} disabled={!biometricSummary.templates_count} className="text-red-600 hover:text-red-700">
+                    <Trash2 className="w-4 h-4 mr-2" />
+                    Excluir biometria
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* NOVO: Alertas do Colaborador */}
             {employeeAlerts?.total_alerts > 0 && (
               <div className="bg-gradient-to-r from-orange-50 to-red-50 border-2 border-orange-300 rounded-lg p-6">
@@ -1437,6 +1552,36 @@ export default function ColaboradorDetalhes() {
               <ScanFace className="w-5 h-5 text-blue-600" />
               Cadastro de Biometria Facial
             </h3>
+
+            {biometricSummary && (
+              <div className="mb-6 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                  <div>
+                    <span className={`inline-flex items-center rounded-full border px-3 py-1 text-sm font-semibold ${getBiometricBadgeClass(biometricSummary.status)}`}>
+                      {biometricSummary.status_label}
+                    </span>
+                    <p className="mt-2 text-sm text-slate-600">
+                      {biometricSummary.templates_count || 0} template(s) | Qualidade {biometricSummary.quality_label || 'Regular'} | Modelo {biometricSummary.model || 'InsightFace'}
+                    </p>
+                    <p className="text-xs text-slate-500">
+                      Ultima atualizacao: {formatDateTime(biometricSummary.last_updated_at)}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" size="sm" onClick={() => setWebcamActive(true)}>
+                      <ScanFace className="w-4 h-4 mr-2" />
+                      Cadastrar biometria
+                    </Button>
+                    <Button type="button" size="sm" variant="outline" onClick={reprocessFacialTemplates} disabled={!biometricSummary.templates_count}>
+                      Reprocessar templates
+                    </Button>
+                    <Button type="button" size="sm" variant="outline" onClick={deleteAllFacialTemplates} disabled={!biometricSummary.templates_count} className="text-red-600 hover:text-red-700">
+                      Excluir biometria
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
             
             {/* Seção de Foto do Colaborador */}
             <div className="mb-6 p-4 bg-slate-50 border border-slate-200 rounded-lg">

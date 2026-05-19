@@ -15,19 +15,19 @@ import { getUploadUrl, logImageError } from '@/utils/imageUtils';
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-const LIVE_DETECTION_CONFIDENCE = 0.52;
-const FACIAL_AUTO_APPROVE_THRESHOLD = 0.85;
+const LIVE_DETECTION_CONFIDENCE = 0.38;
+const FACIAL_AUTO_APPROVE_THRESHOLD = 0.80;
 const FACIAL_REVIEW_THRESHOLD = 0.70;
-const LIVE_STABILITY_TIME = 350;
-const LIVE_MAX_AUTO_ATTEMPTS = 5;
-const LIVE_DETECTION_INTERVAL = 150;
-const DETECTION_GRACE_MS = 700;
-const STABILITY_TIMER_DELAY = 80;
-const FRAME_BURST_COUNT = 5;
-const FRAME_BURST_DELAY = 60;
-const CENTER_TOLERANCE_X = 0.30;
-const CENTER_TOLERANCE_Y = 0.34;
-const MIN_FACE_AREA_RATIO = 0.025;
+const LIVE_STABILITY_TIME = 120;
+const LIVE_MAX_AUTO_ATTEMPTS = 9999;
+const LIVE_DETECTION_INTERVAL = 100;
+const DETECTION_GRACE_MS = 350;
+const STABILITY_TIMER_DELAY = 20;
+const FRAME_BURST_COUNT = 3;
+const FRAME_BURST_DELAY = 180;
+const CENTER_TOLERANCE_X = 0.42;
+const CENTER_TOLERANCE_Y = 0.42;
+const MIN_FACE_AREA_RATIO = 0.015;
 const TARGET_FACE_AREA_RATIO = 0.16;
 const MOTION_TOLERANCE_RATIO = 0.08;
 
@@ -509,7 +509,11 @@ export default function EntregaEPI() {
       return null;
     }
 
-    return frames.sort((left, right) => right.quality.totalScore - left.quality.totalScore)[0];
+    const sortedFrames = frames.sort((left, right) => right.quality.totalScore - left.quality.totalScore);
+    return {
+      best: sortedFrames[0],
+      frames: sortedFrames
+    };
   }, []);
 
   const resetAfterProcessV2 = useCallback((wasAutoCapture = false, options = {}) => {
@@ -543,24 +547,24 @@ export default function EntregaEPI() {
 
     processingRef.current = true;
     stopContinuousDetection();
-    await wait(120);
+    await wait(40);
 
     setIsProcessingEmbedding(true);
     setLoading(true);
-    setLoadingStatus('Capturando melhor frame...');
+    setLoadingStatus('Reconhecendo automaticamente...');
 
     try {
-      const bestFrame = await captureBestFrameBurst();
-      if (!bestFrame) {
-        toast.error('Nao foi possivel capturar um rosto valido. Tente novamente.');
-        resetAfterProcessV2(isAutoCapture);
+      const burst = await captureBestFrameBurst();
+      if (!burst?.best) {
+        setSimilarityMessage('Aguardando imagem utilizavel');
+        resetAfterProcessV2(isAutoCapture, { restartDelay: 80, forceRestart: true });
         return;
       }
+      const bestFrame = burst.best;
 
-      setLoadingStatus('Enviando imagem para reconhecimento...');
       const identifyResponse = await axios.post(
-        `${API}/facial/identify-fast`,
-        { image_base64: bestFrame.imageSrc },
+        `${API}/facial/identify-burst`,
+        { images_base64: burst.frames.map((frame) => frame.imageSrc) },
         { headers: getAuthHeader() }
       );
       const identifyResult = identifyResponse.data;
@@ -569,81 +573,19 @@ export default function EntregaEPI() {
       if (identifyResult.status === 'approved' && identifyResult.employee_id) {
         const employee = await resolveEmployeeById(identifyResult.employee_id);
         await finalizeSuccessfulMatch(employee, bestFrame, identifyResult, {
-          secondCaptureUsed: Boolean(pendingConfirmationRef.current)
+          secondCaptureUsed: false
         });
         return;
       }
 
-      if (identifyResult.status === 'retry' && identifyResult.employee_id) {
-        const pending = pendingConfirmationRef.current;
-
-        if (pending?.employeeId === identifyResult.employee_id && pending?.frameImageSrc) {
-          setLoadingStatus('Validando segunda captura...');
-          const livenessResponse = await axios.post(
-            `${API}/facial/liveness-check`,
-            {
-              image_base64: bestFrame.imageSrc,
-              previous_image_base64: pending.frameImageSrc
-            },
-            { headers: getAuthHeader() }
-          );
-          const livenessResult = livenessResponse.data;
-
-          if (livenessResult.passed) {
-            const employee = await resolveEmployeeById(identifyResult.employee_id);
-            await finalizeSuccessfulMatch(employee, bestFrame, identifyResult, {
-              secondCaptureUsed: true,
-              livenessStatus: livenessResult.status
-            });
-            return;
-          }
-
-          setSimilarityScore(percentMatch);
-          setSimilarityMessage(livenessResult.message || identifyResult.message);
-          setNotFoundMessage({
-            message: livenessResult.message || 'Segunda captura nao confirmou a identidade',
-            bestScore: percentMatch,
-            threshold: Math.round(FACIAL_REVIEW_THRESHOLD * 100)
-          });
-          toast.warning(livenessResult.message || 'Segunda captura nao confirmou a identidade');
-          resetAfterProcessV2(isAutoCapture);
-          return;
-        }
-
-        pendingConfirmationRef.current = {
-          employeeId: identifyResult.employee_id,
-          similarityScore: identifyResult.similarity_score,
-          frameImageSrc: bestFrame.imageSrc
-        };
-        setSimilarityScore(percentMatch);
-        setSimilarityMessage(identifyResult.message || `Faixa de confirmacao: ${percentMatch}%`);
-        setNotFoundMessage(null);
-        toast.warning(identifyResult.message || 'Capturando novamente para confirmar a identidade');
-        resetAfterProcessV2(true, {
-          preservePendingConfirmation: true,
-          restartDelay: 200,
-          forceRestart: true
-        });
-        return;
-      }
-
-      pendingConfirmationRef.current = null;
       setSimilarityScore(percentMatch);
-      setSimilarityMessage(identifyResult.message || `Similaridade insuficiente: ${percentMatch}%`);
-      setNotFoundMessage({
-        message: identifyResult.message || 'Reconhecimento bloqueado por baixa similaridade',
-        bestScore: percentMatch,
-        threshold: Math.round(FACIAL_REVIEW_THRESHOLD * 100)
-      });
-      if (isAutoCapture && autoAttemptsRef.current >= LIVE_MAX_AUTO_ATTEMPTS) {
-        setAutoCaptureEnabled(false);
-      }
-      toast.error(identifyResult.message || 'Reconhecimento bloqueado');
-      resetAfterProcessV2(isAutoCapture);
+      setSimilarityMessage(identifyResult.message || 'Procurando colaborador automaticamente');
+      setNotFoundMessage(null);
+      resetAfterProcessV2(isAutoCapture, { restartDelay: 80, forceRestart: true });
     } catch (error) {
       console.error('Erro na identificacao facial:', error);
-      toast.error(error.response?.data?.detail || 'Erro ao processar reconhecimento facial');
-      resetAfterProcessV2(isAutoCapture);
+      setSimilarityMessage('Nova tentativa automatica em andamento');
+      resetAfterProcessV2(isAutoCapture, { restartDelay: 180, forceRestart: true });
     } finally {
       processingRef.current = false;
     }
@@ -1711,6 +1653,29 @@ export default function EntregaEPI() {
                 Histórico
               </button>
             </div>
+
+            {(selectedEmployee?.biometric_status === 'missing' || selectedEmployee?.biometric?.status === 'missing') && (
+              <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-4">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-medium text-red-800">Colaborador sem biometria cadastrada.</p>
+                      <p className="text-sm text-red-700">Cadastre a biometria antes de depender da identificacao facial automatica.</p>
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => navigate(`/colaboradores/${selectedEmployee.id}`)}
+                    className="border-red-300 text-red-700 hover:bg-red-100"
+                  >
+                    <UserPlus className="w-4 h-4 mr-2" />
+                    Cadastrar biometria agora
+                  </Button>
+                </div>
+              </div>
+            )}
 
             {/* EPIs em uso */}
             <div className={employeeCurrentItems.length > 0 ? 'p-4 bg-amber-50 border border-amber-200 rounded-lg' : 'hidden'}>

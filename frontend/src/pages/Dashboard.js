@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
-import { Users, Package, AlertTriangle, TrendingUp, Calendar, Bell, Clock } from 'lucide-react';
+import { Users, Package, AlertTriangle, TrendingUp, Calendar, Bell, Clock, ScanFace } from 'lucide-react';
 import axios from 'axios';
 import { getAuthHeader } from '@/contexts/AuthContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -176,6 +176,44 @@ export default function Dashboard() {
         )}
 
         {/* NOVO: Card de Alertas de EPI Obrigatório e Periodicidade */}
+        <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-6">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-5">
+            <div>
+              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                <ScanFace className="w-5 h-5 text-blue-600" />
+                Dashboard biometrico
+              </h2>
+              <p className="text-sm text-slate-500 mt-1">Cobertura dos templates faciais dos colaboradores ativos</p>
+            </div>
+            <div className="rounded-full bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-700">
+              {stats?.biometric_coverage_percent || 0}% cobertura
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+              <p className="text-xs font-medium uppercase text-slate-500">Total</p>
+              <p className="text-2xl font-bold text-slate-900 font-mono">{stats?.biometric_total_employees || 0}</p>
+            </div>
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+              <p className="text-xs font-medium uppercase text-emerald-700">Com biometria</p>
+              <p className="text-2xl font-bold text-emerald-700 font-mono">{stats?.biometric_registered || 0}</p>
+            </div>
+            <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+              <p className="text-xs font-medium uppercase text-red-700">Sem biometria</p>
+              <p className="text-2xl font-bold text-red-700 font-mono">{stats?.biometric_missing || 0}</p>
+            </div>
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+              <p className="text-xs font-medium uppercase text-amber-700">Incompleta</p>
+              <p className="text-2xl font-bold text-amber-700 font-mono">{stats?.biometric_incomplete || 0}</p>
+            </div>
+            <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+              <p className="text-xs font-medium uppercase text-blue-700">Cobertura</p>
+              <p className="text-2xl font-bold text-blue-700 font-mono">{stats?.biometric_coverage_percent || 0}%</p>
+            </div>
+          </div>
+        </div>
+
         {(stats?.total_alerts > 0) && (
           <div 
             onClick={() => handleCardClick('alertas')}

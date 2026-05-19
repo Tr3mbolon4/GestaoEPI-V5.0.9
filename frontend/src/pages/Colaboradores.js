@@ -13,6 +13,18 @@ import { getUploadUrl, logImageError, hasMixedContentRisk } from '@/utils/imageU
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
+const getBiometricStatus = (colaborador) => {
+  const status = colaborador.biometric?.status || colaborador.biometric_status || 'missing';
+  const count = colaborador.biometric?.templates_count ?? colaborador.biometric_templates_count ?? 0;
+  if (status === 'registered' || count >= 3) {
+    return { label: 'Cadastrada', color: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500', count };
+  }
+  if (status === 'incomplete' || count > 0) {
+    return { label: 'Incompleta', color: 'bg-amber-100 text-amber-700', dot: 'bg-amber-500', count };
+  }
+  return { label: 'Nao cadastrada', color: 'bg-red-100 text-red-700', dot: 'bg-red-500', count: 0 };
+};
+
 // Componente de Avatar com fallback robusto para erro de carregamento
 const AvatarImage = ({ src, alt, className, fallbackClassName, bustCache = false }) => {
   const [imageStatus, setImageStatus] = useState('idle');
@@ -1003,6 +1015,15 @@ export default function Colaboradores() {
                             <span className="text-xs text-slate-500">{col.department}</span>
                           )}
                         </div>
+                        {(() => {
+                          const biometric = getBiometricStatus(col);
+                          return (
+                            <div className={`mt-2 inline-flex items-center gap-2 px-2 py-1 rounded-full text-xs font-medium ${biometric.color}`}>
+                              <span className={`w-2 h-2 rounded-full ${biometric.dot}`}></span>
+                              {biometric.label} ({biometric.count})
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                     <div className="mt-4 pt-3 border-t border-slate-100">
@@ -1028,6 +1049,7 @@ export default function Colaboradores() {
                     <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase hidden md:table-cell">Matrícula</th>
                     <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase hidden lg:table-cell">Cargo</th>
                     <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase hidden xl:table-cell">Setor</th>
+                    <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase">Biometria Facial</th>
                     <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase">Status</th>
                     <th className="px-4 lg:px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase">Ações</th>
                   </tr>
@@ -1052,6 +1074,18 @@ export default function Colaboradores() {
                       <td className="px-4 lg:px-6 py-4 text-sm font-mono text-slate-900 hidden md:table-cell">{col.registration_number || '-'}</td>
                       <td className="px-4 lg:px-6 py-4 text-sm text-slate-900 hidden lg:table-cell">{col.position || '-'}</td>
                       <td className="px-4 lg:px-6 py-4 text-sm text-slate-900 hidden xl:table-cell">{col.department || '-'}</td>
+                      <td className="px-4 lg:px-6 py-4">
+                        {(() => {
+                          const biometric = getBiometricStatus(col);
+                          return (
+                            <span className={`inline-flex items-center gap-2 px-2 py-1 rounded-full text-xs font-medium ${biometric.color}`}>
+                              <span className={`w-2 h-2 rounded-full ${biometric.dot}`}></span>
+                              {biometric.label}
+                              <span className="text-[11px] opacity-75">({biometric.count})</span>
+                            </span>
+                          );
+                        })()}
+                      </td>
                       <td className="px-4 lg:px-6 py-4">
                         <span className={`px-2 py-1 rounded-full text-xs font-medium ${
                           col.status === 'active'

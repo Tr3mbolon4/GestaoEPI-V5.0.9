@@ -584,6 +584,9 @@ class FacialEnrollResponse(BaseModel):
 class FacialIdentifyFastRequest(BaseModel):
     image_base64: str
 
+class FacialIdentifyBurstRequest(BaseModel):
+    images_base64: List[str]
+
 
 class FacialIdentifyFastResponse(BaseModel):
     employee_id: Optional[str] = None

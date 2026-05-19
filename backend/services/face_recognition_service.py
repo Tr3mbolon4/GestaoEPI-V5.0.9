@@ -23,14 +23,14 @@ except Exception:  # pragma: no cover - dependency may be unavailable in local d
     FaceAnalysis = None
 
 
-SIMILARITY_AUTO_APPROVE = 0.85
+SIMILARITY_AUTO_APPROVE = 0.80
 SIMILARITY_RETRY_MIN = 0.70
-MIN_DETECTION_SCORE = 0.45
-MIN_BRIGHTNESS = 55
-MIN_SHARPNESS = 18
-MIN_FACE_RATIO = 0.06
-MAX_FACE_RATIO = 0.45
-MAX_CENTER_OFFSET = 0.22
+MIN_DETECTION_SCORE = 0.35
+MIN_BRIGHTNESS = 35
+MIN_SHARPNESS = 5
+MIN_FACE_RATIO = 0.025
+MAX_FACE_RATIO = 0.65
+MAX_CENTER_OFFSET = 0.38
 
 
 @dataclass
@@ -275,12 +275,12 @@ class FaceRecognitionService:
         image_metrics = self._brightness_and_sharpness(image_bgr)
         if image_metrics["brightness"] < MIN_BRIGHTNESS:
             return {"status": "retry", "message": "Imagem escura. Melhore a iluminacao antes de continuar."}
-        if image_metrics["sharpness"] < MIN_SHARPNESS:
-            return {"status": "retry", "message": "Imagem com borrado. Mantenha a camera firme por um instante."}
-
         embedding = np.asarray(getattr(face, "embedding", None), dtype=np.float32)
         if embedding.size == 0:
             return {"status": "retry", "message": "Nao foi possivel gerar embedding facial. Tente novamente."}
+
+        if image_metrics["sharpness"] < MIN_SHARPNESS:
+            return {"status": "retry", "message": "Imagem inutilizavel para biometria. Nova captura automatica em andamento."}
 
         return {
             "status": "ok",
@@ -371,18 +371,18 @@ class FaceRecognitionService:
             liveness_required = False
         elif best_similarity >= SIMILARITY_RETRY_MIN:
             status = "retry"
-            message = "Confianca media. Realize uma segunda captura automatica ou validacao de movimento."
-            liveness_required = True
+            message = "Confianca media. Nova captura automatica em andamento."
+            liveness_required = False
         else:
-            status = "blocked"
-            message = "Similaridade abaixo do limite de seguranca. Nova tentativa obrigatoria."
+            status = "retry"
+            message = "Similaridade abaixo do limite. Procurando novamente."
             liveness_required = False
 
         return {
             "status": status,
             "message": message,
-            "employee_id": best_record.employee_id if status != "blocked" else None,
-            "employee_name": best_record.employee_name if status != "blocked" else None,
+            "employee_id": best_record.employee_id if best_similarity >= SIMILARITY_RETRY_MIN else None,
+            "employee_name": best_record.employee_name if best_similarity >= SIMILARITY_RETRY_MIN else None,
             "similarity_score": round(float(best_similarity), 4),
             "detection_confidence": round(float(evaluation["detection_score"]), 4),
             "liveness_required": liveness_required,
