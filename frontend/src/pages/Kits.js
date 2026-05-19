@@ -27,6 +27,10 @@ export default function Kits() {
   });
   const [selectedEPI, setSelectedEPI] = useState('');
   const [epiQuantity, setEpiQuantity] = useState(1);
+  const kitEpis = epis.map((epi) => ({
+    ...epi,
+    baseLabel: [epi.name, epi.category || epi.type_category, epi.model].filter(Boolean).join(' - ')
+  }));
 
   useEffect(() => {
     fetchData();
@@ -55,17 +59,20 @@ export default function Kits() {
     }
     const epi = epis.find(e => e.id === selectedEPI);
     if (epi) {
-      if (formData.items.find(i => i.epi_id === epi.id)) {
+      if (formData.items.find(i => (i.epi_base_id || i.epi_id) === epi.id)) {
         toast.error('Este EPI já foi adicionado ao kit');
         return;
       }
       setFormData({
         ...formData,
         items: [...formData.items, { 
+          epi_base_id: epi.id,
           epi_id: epi.id, 
           name: epi.name, 
           quantity: epiQuantity,
-          ca_number: epi.ca_number,
+          description: epi.description,
+          category: epi.category || epi.type_category,
+          model: epi.model,
           type_category: epi.type_category
         }]
       });
@@ -111,7 +118,7 @@ export default function Kits() {
         sector: formData.sector,
         is_mandatory: formData.is_mandatory,
         items: formData.items.map(item => ({
-          epi_id: item.epi_id,
+          epi_base_id: item.epi_base_id || item.epi_id,
           quantity: item.quantity
         }))
       };
@@ -140,13 +147,16 @@ export default function Kits() {
         return item;
       }
       // Se não tem nome, buscar do EPI correspondente
-      const epi = epis.find(e => e.id === item.epi_id);
+      const epi = epis.find(e => e.id === (item.epi_base_id || item.epi_id));
       if (epi) {
         return {
           ...item,
+          epi_base_id: epi.id,
+          epi_id: epi.id,
           name: epi.name,
-          ca_number: epi.ca_number,
-          nbr_number: epi.nbr_number,
+          description: epi.description,
+          category: epi.category || epi.type_category,
+          model: epi.model,
           type_category: epi.type_category
         };
       }
@@ -180,12 +190,14 @@ export default function Kits() {
       if (item.name) {
         return item;
       }
-      const epi = epis.find(e => e.id === item.epi_id);
+      const epi = epis.find(e => e.id === (item.epi_base_id || item.epi_id));
       if (epi) {
         return {
           ...item,
           name: epi.name,
-          ca_number: epi.ca_number
+          description: epi.description,
+          category: epi.category || epi.type_category,
+          model: epi.model
         };
       }
       return { ...item, name: 'EPI não encontrado' };
@@ -194,7 +206,7 @@ export default function Kits() {
     const itemsList = enrichedItems.map(item => `
       <tr>
         <td style="padding: 8px; border-bottom: 1px solid #ddd;">${item.name || 'Item sem nome'}</td>
-        <td style="padding: 8px; border-bottom: 1px solid #ddd;">${item.ca_number || '-'}</td>
+        <td style="padding: 8px; border-bottom: 1px solid #ddd;">${item.category || item.type_category || '-'}</td>
         <td style="padding: 8px; border-bottom: 1px solid #ddd; text-align: center;">${item.quantity}</td>
       </tr>
     `).join('') || '<tr><td colspan="3">Nenhum item</td></tr>';
@@ -219,7 +231,7 @@ export default function Kits() {
             <thead>
               <tr>
                 <th>EPI</th>
-                <th>CA</th>
+                <th>Categoria</th>
                 <th>Quantidade</th>
               </tr>
             </thead>
@@ -243,12 +255,14 @@ export default function Kits() {
       if (item.name) {
         return item;
       }
-      const epi = epis.find(e => e.id === item.epi_id);
+      const epi = epis.find(e => e.id === (item.epi_base_id || item.epi_id));
       if (epi) {
         return {
           ...item,
           name: epi.name,
-          ca_number: epi.ca_number,
+          description: epi.description,
+          category: epi.category || epi.type_category,
+          model: epi.model,
           type_category: epi.type_category
         };
       }
@@ -361,9 +375,9 @@ export default function Kits() {
                       data-testid="select-epi-kit"
                     >
                       <option value="">Selecione um EPI...</option>
-                      {epis.map(epi => (
+                      {kitEpis.map(epi => (
                         <option key={epi.id} value={epi.id}>
-                          {epi.name} {epi.ca_number ? `(CA: ${epi.ca_number})` : epi.nbr_number ? `(NBR: ${epi.nbr_number})` : ''}
+                          {epi.baseLabel || epi.name}
                         </option>
                       ))}
                     </select>
@@ -403,7 +417,7 @@ export default function Kits() {
                             <Package className="w-5 h-5 text-emerald-600" />
                             <div>
                               <p className="font-medium text-slate-900">{item.name}</p>
-                              <p className="text-xs text-slate-500">CA: {item.ca_number || 'N/A'}</p>
+                              <p className="text-xs text-slate-500">{item.category || item.type_category || 'Sem categoria'}{item.model ? ` - ${item.model}` : ''}</p>
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
@@ -572,7 +586,7 @@ export default function Kits() {
                             <Package className="w-5 h-5 text-emerald-600" />
                             <div>
                               <p className="font-medium text-slate-900">{item.name || 'Item'}</p>
-                              <p className="text-xs text-slate-500">CA: {item.ca_number || 'N/A'}</p>
+                              <p className="text-xs text-slate-500">{item.category || item.type_category || 'Sem categoria'}{item.model ? ` - ${item.model}` : ''}</p>
                             </div>
                           </div>
                           <span className="text-sm font-medium text-slate-700 bg-white px-3 py-1 rounded-full border">

@@ -33,6 +33,18 @@ const MOTION_TOLERANCE_RATIO = 0.08;
 
 const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 const normalizeSize = (value) => (value ? String(value).trim().toUpperCase() : '');
+const formatVariationLabel = (variation) => {
+  if (!variation) return 'Selecione a variacao';
+  const parts = [
+    variation.size || variation.tamanho ? `Tam. ${variation.size || variation.tamanho}` : null,
+    variation.ca_number || variation.ca ? `CA ${variation.ca_number || variation.ca}` : null,
+    variation.batch || variation.lote ? `Lote ${variation.batch || variation.lote}` : null,
+    variation.brand || variation.marca,
+    variation.model || variation.modelo,
+    `Estoque ${variation.current_stock ?? variation.quantidade_estoque ?? 0}`
+  ].filter(Boolean);
+  return parts.join(' | ');
+};
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -1118,16 +1130,21 @@ export default function EntregaEPI() {
     return candidates[0] || null;
   };
 
-  const mapSuggestionItemToSelectedItem = (item, kitName) => ({
+  const mapSuggestionItemToSelectedItem = (item, kitName, kitId = '') => ({
     epi_id: item.epi_id,
-    epi_variation_id: item.epi_variation_id || item.variation?.id,
+    epi_base_id: item.epi_base_id || item.epi_id,
+    epi_variation_id: '',
+    kit_id: kitId,
     name: item.name,
     quantity: item.quantity || 1,
-    size: item.variation?.size || item.variation?.tamanho || item.requested_size || '',
-    batch: item.variation?.batch || item.variation?.lote || '',
-    qr_code: item.variation?.qr_code || '',
-    ca_number: item.variation?.ca_number || item.variation?.ca || '',
-    from_kit: kitName || item.kit_name || ''
+    size: '',
+    batch: '',
+    qr_code: '',
+    ca_number: '',
+    from_kit: kitName || item.kit_name || '',
+    available_variations: item.available_variations || [],
+    suggested_variation_id: item.suggested_variation_id || item.variation?.id || '',
+    requires_variation_selection: item.requires_variation_selection !== false
   });
 
   const fetchDeliverySuggestions = async (employeeId, kitId = '') => {
@@ -1143,7 +1160,7 @@ export default function EntregaEPI() {
       const unavailableItems = (response.data.items || []).filter((item) => item.status !== 'available');
 
       if (kitId || (response.data.kit_id && selectedItems.length === 0)) {
-        setSelectedItems(availableItems.map((item) => mapSuggestionItemToSelectedItem(item, response.data.kit_name)));
+        setSelectedItems(availableItems.map((item) => mapSuggestionItemToSelectedItem(item, response.data.kit_name, response.data.kit_id)));
       }
 
       unavailableItems.forEach((item) => {
@@ -1244,11 +1261,30 @@ export default function EntregaEPI() {
       return;
     }
     await fetchDeliverySuggestions(selectedEmployee.id, kit.id);
-    toast.success(`Kit "${kit.name}" carregado com sugestão automática de tamanhos`);
+    toast.success(`Kit "${kit.name}" carregado. Selecione as variacoes disponiveis.`);
   };
 
   const removeItem = (index) => {
     setSelectedItems(selectedItems.filter((_, i) => i !== index));
+  };
+
+  const applyVariationToItem = (index, variationId) => {
+    setSelectedItems((currentItems) => currentItems.map((item, itemIndex) => {
+      if (itemIndex !== index) return item;
+      const variation = (item.available_variations || []).find((entry) => entry.id === variationId);
+      return {
+        ...item,
+        epi_variation_id: variationId,
+        size: variation?.size || variation?.tamanho || '',
+        batch: variation?.batch || variation?.lote || '',
+        qr_code: variation?.qr_code || '',
+        ca_number: variation?.ca_number || variation?.ca || '',
+        brand: variation?.brand || variation?.marca || '',
+        model: variation?.model || variation?.modelo || '',
+        supplier_name: variation?.supplier_name || variation?.fornecedor || '',
+        validity_date: variation?.validity_date || variation?.ca_validity || variation?.validade_ca || ''
+      };
+    }));
   };
 
   // Função para mostrar termo de consentimento antes de confirmar
@@ -1263,6 +1299,11 @@ export default function EntregaEPI() {
       return;
     }
     // Chamar diretamente a entrega (consentimento já foi dado no cadastro da biometria)
+    const missingVariation = selectedItems.find((item) => item.requires_variation_selection && !item.epi_variation_id);
+    if (missingVariation) {
+      toast.error(`Selecione a variacao de ${missingVariation.name} antes de concluir.`);
+      return;
+    }
     await completeDelivery();
   };
 
@@ -1810,13 +1851,35 @@ export default function EntregaEPI() {
             <div className={selectedItems.length > 0 ? 'space-y-2 mb-6' : 'hidden'}>
               <p className="text-sm font-medium text-slate-700">Itens selecionados ({selectedItems.length}):</p>
               {selectedItems.map((item, index) => (
-                <div key={item.id || `selected-${item.name}-${index}`} className="flex items-center justify-between p-3 bg-slate-50 rounded-md">
-                  <div>
+                <div key={item.id || `selected-${item.name}-${index}`} className="flex items-start justify-between gap-3 p-3 bg-slate-50 rounded-md">
+                  <div className="flex-1">
                     <p className="font-medium text-slate-900">{item.name}</p>
                     <p className="text-sm text-slate-600">
                       CA: {item.ca_number || 'N/A'} | Qtd: {item.quantity}
                       <span className={item.from_kit ? 'text-blue-600 ml-2' : 'hidden'}>(Kit: {item.from_kit})</span>
                     </p>
+                    {item.requires_variation_selection && (
+                      <div className="mt-2">
+                        <select
+                          value={item.epi_variation_id || ''}
+                          onChange={(event) => applyVariationToItem(index, event.target.value)}
+                          className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                        >
+                          <option value="">Selecione tamanho / CA / lote...</option>
+                          {(item.available_variations || []).map((variation) => (
+                            <option key={variation.id} value={variation.id}>
+                              {formatVariationLabel(variation)}
+                            </option>
+                          ))}
+                        </select>
+                        {(item.available_variations || []).length === 0 && (
+                          <p className="mt-1 text-xs font-medium text-red-600">Sem estoque disponivel para este EPI.</p>
+                        )}
+                        {item.suggested_variation_id && !item.epi_variation_id && (
+                          <p className="mt-1 text-xs text-slate-500">Sugestao conforme cadastro do colaborador: {formatVariationLabel((item.available_variations || []).find((variation) => variation.id === item.suggested_variation_id))}</p>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <button
                     onClick={() => removeItem(index)}
@@ -1831,7 +1894,7 @@ export default function EntregaEPI() {
             <div className="flex gap-3">
               <button
                 onClick={handleConfirmDelivery}
-                disabled={loading || selectedItems.length === 0}
+                disabled={loading || selectedItems.length === 0 || selectedItems.some((item) => item.requires_variation_selection && !item.epi_variation_id)}
                 data-testid="complete-delivery"
                 className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-white font-medium rounded-md px-4 py-3 flex items-center justify-center gap-2 disabled:opacity-50"
               >

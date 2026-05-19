@@ -403,6 +403,7 @@ class EPIResponse(BaseModel):
 # ===================== KIT =====================
 
 class KitItemInput(BaseModel):
+    epi_base_id: Optional[str] = None
     epi_id: Optional[str] = None
     quantity: int = 1
 

@@ -173,7 +173,11 @@ export default function HistoricoEntregas() {
                             <Package className="w-3 h-3" />
                             <span>
                               {item.quantity}x {item.epi_name || item.kit_name || 'Item'}
+                              {item.size && <span className="text-slate-400 ml-1">Tam: {item.size}</span>}
                               {item.ca_number && <span className="text-slate-400 ml-1">(CA: {item.ca_number})</span>}
+                              {item.batch && <span className="text-slate-400 ml-1">Lote: {item.batch}</span>}
+                              {item.supplier_name && <span className="text-slate-400 ml-1">Fornecedor: {item.supplier_name}</span>}
+                              {item.kit_name && <span className="text-blue-600 ml-1">Kit: {item.kit_name}</span>}
                             </span>
                           </div>
                         ))}

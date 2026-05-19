@@ -1612,17 +1612,26 @@ async def build_kit_response(db, kit: dict) -> dict:
     response = doc_to_response(kit)
     items = []
     for raw_item in kit.get('items', []):
-        epi_id = raw_item.get('epi_id')
-        item = {"epi_id": epi_id, "quantity": raw_item.get('quantity', 1)}
-        if epi_id:
-            epi = await db.epis.find_one({"_id": ObjectId(epi_id)})
+        epi_base_id = raw_item.get('epi_base_id') or raw_item.get('epi_id')
+        item = {"epi_base_id": epi_base_id, "epi_id": epi_base_id, "quantity": raw_item.get('quantity', 1)}
+        if epi_base_id:
+            epi = await db.epis.find_one({"_id": ObjectId(epi_base_id)})
             if epi:
                 epi_data = await build_epi_response(db, epi)
                 item.update({
                     "name": epi_data.get('name'),
+                    "description": epi_data.get('description'),
                     "category": epi_data.get('category'),
                     "type_category": epi_data.get('type_category'),
-                    "possui_variacao_tamanho": epi_data.get('possui_variacao_tamanho', False)
+                    "model": epi.get('model'),
+                    "modelo": epi.get('model'),
+                    "possui_variacao_tamanho": epi_data.get('possui_variacao_tamanho', False),
+                    "variations_count": len(epi_data.get('variations', [])),
+                    "available_variations_count": len([
+                        variation
+                        for variation in epi_data.get('variations', [])
+                        if (variation.get('current_stock', 0) or 0) > 0 and (variation.get('status') or 'ativo') != 'inativo'
+                    ])
                 })
         items.append(item)
     response['items'] = items
@@ -1666,35 +1675,55 @@ async def resolve_epi_variation(db, epi: dict, employee: Optional[dict] = None, 
         return choose_primary_variation(generic)
     return choose_primary_variation(candidates)
 
+async def get_available_variations_for_delivery(db, epi: dict, require_stock: bool = True) -> List[dict]:
+    variations = await get_epi_variations(db, epi)
+    active = [item for item in variations if (item.get('status') or 'ativo') != 'inativo']
+    return [
+        item for item in active
+        if not require_stock or (item.get('current_stock', 0) or 0) > 0
+    ]
+
 async def build_delivery_suggestions_for_kit(db, employee: dict, kit: dict) -> dict:
     items = []
     for raw_item in kit.get('items', []):
-        epi_id = raw_item.get('epi_id')
-        if not epi_id:
+        epi_base_id = raw_item.get('epi_base_id') or raw_item.get('epi_id')
+        if not epi_base_id:
             continue
-        epi = await db.epis.find_one({"_id": ObjectId(epi_id)})
+        epi = await db.epis.find_one({"_id": ObjectId(epi_base_id)})
         if not epi:
             continue
         epi_data = await build_epi_response(db, epi)
         size_field = infer_employee_size_field(epi_data)
         requested_size = employee.get(size_field) if size_field else None
-        variation = await resolve_epi_variation(db, epi, employee=employee, require_stock=True)
-        if variation:
+        available_variations = await get_available_variations_for_delivery(db, epi, require_stock=True)
+        suggested_variation = await resolve_epi_variation(db, epi, employee=employee, require_stock=True)
+        if available_variations:
             items.append({
-                "epi_id": epi_id,
-                "epi_variation_id": str(variation['_id']),
+                "epi_base_id": epi_base_id,
+                "epi_id": epi_base_id,
+                "epi_variation_id": None,
                 "name": epi_data.get('name'),
+                "description": epi_data.get('description'),
+                "category": epi_data.get('category'),
+                "type_category": epi_data.get('type_category'),
                 "quantity": raw_item.get('quantity', 1),
                 "size_source": size_field,
                 "requested_size": requested_size,
                 "status": "available",
                 "message": "VariaÃ§Ã£o encontrada em estoque",
-                "variation": serialize_epi_variation(variation)
+                "requires_variation_selection": True,
+                "suggested_variation_id": str(suggested_variation['_id']) if suggested_variation else None,
+                "available_variations": [serialize_epi_variation(variation) for variation in available_variations],
+                "variation": serialize_epi_variation(suggested_variation) if suggested_variation else None
             })
         else:
             items.append({
-                "epi_id": epi_id,
+                "epi_base_id": epi_base_id,
+                "epi_id": epi_base_id,
                 "name": epi_data.get('name'),
+                "description": epi_data.get('description'),
+                "category": epi_data.get('category'),
+                "type_category": epi_data.get('type_category'),
                 "quantity": raw_item.get('quantity', 1),
                 "size_source": size_field,
                 "requested_size": requested_size,
@@ -1913,11 +1942,11 @@ async def create_kit(kit_data: KitCreate, current_user: dict = Depends(require_r
     db = await get_db()
     items = [
         {
-            'epi_id': item.epi_id,
+            'epi_base_id': item.epi_base_id or item.epi_id,
             'quantity': item.quantity
         }
         for item in kit_data.items
-        if item.epi_id
+        if item.epi_base_id or item.epi_id
     ]
     new_kit = {
         'name': kit_data.name,
@@ -1955,11 +1984,11 @@ async def update_kit(kit_id: str, kit_data: KitUpdate, current_user: dict = Depe
     if kit_data.items is not None:
         update_data['items'] = [
             {
-                'epi_id': item.epi_id,
+                'epi_base_id': item.epi_base_id or item.epi_id,
                 'quantity': item.quantity
             }
             for item in kit_data.items
-            if item.epi_id
+            if item.epi_base_id or item.epi_id
         ]
     update_data['updated_at'] = datetime.now(timezone.utc)
     result = await db.kits.find_one_and_update({'_id': ObjectId(kit_id)}, {'$set': update_data}, return_document=True)
@@ -1996,6 +2025,14 @@ async def create_delivery(delivery_data: DeliveryCreate, current_user: dict = De
             epi = await db.epis.find_one({'_id': ObjectId(item.epi_id)})
             if not epi:
                 raise HTTPException(status_code=404, detail='EPI n?o encontrado para entrega.')
+
+            available_variations = await get_available_variations_for_delivery(
+                db,
+                epi,
+                require_stock=not delivery_data.is_return
+            )
+            if not item.epi_variation_id and len(available_variations) > 1:
+                raise HTTPException(status_code=400, detail='Selecione a variacao do EPI antes de concluir a entrega.')
 
             variation = await resolve_epi_variation(
                 db,
@@ -2035,8 +2072,16 @@ async def create_delivery(delivery_data: DeliveryCreate, current_user: dict = De
                 'batch': variation.get('batch') or item.batch,
                 'qr_code': variation.get('qr_code') or item.qr_code,
                 'ca_number': variation.get('ca_number'),
-                'supplier_name': variation.get('supplier_name')
+                'ca_validity': variation.get('ca_validity'),
+                'validity_date': variation.get('validity_date'),
+                'supplier_id': variation.get('supplier_id'),
+                'supplier_name': variation.get('supplier_name'),
+                'quantity': item.quantity,
+                'kit_id': item.kit_id
             })
+            if item.kit_id:
+                kit_doc = await db.kits.find_one({'_id': ObjectId(item.kit_id)})
+                item_dict['kit_name'] = kit_doc.get('name') if kit_doc else None
 
         items_list.append(item_dict)
 
@@ -2248,7 +2293,7 @@ async def get_pending_epi_alerts(current_user: dict = Depends(get_current_user))
         # Verificar EPIs faltantes do kit
         missing_epis = []
         for kit_item in kit.get('items', []):
-            epi_id = kit_item.get('epi_id')
+            epi_id = kit_item.get('epi_base_id') or kit_item.get('epi_id')
             if epi_id and epi_id not in delivered_epi_ids:
                 epi_doc = await db.epis.find_one({'_id': ObjectId(epi_id)})
                 missing_epis.append({
@@ -2404,7 +2449,7 @@ async def get_employee_alerts(employee_id: str, current_user: dict = Depends(get
         
         # Verificar EPIs faltantes
         for kit_item in kit.get('items', []):
-            epi_id = kit_item.get('epi_id')
+            epi_id = kit_item.get('epi_base_id') or kit_item.get('epi_id')
             if epi_id and epi_id not in delivered_epi_ids:
                 alerts['pending_epis'].append({
                     'epi_id': epi_id,
