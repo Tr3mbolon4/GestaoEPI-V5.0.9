@@ -405,6 +405,13 @@ class EPIResponse(BaseModel):
 class KitItemInput(BaseModel):
     epi_base_id: Optional[str] = None
     epi_id: Optional[str] = None
+    epi_group_key: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    type_category: Optional[str] = None
+    model: Optional[str] = None
+    brand: Optional[str] = None
     quantity: int = 1
 
 class KitCreate(BaseModel):
@@ -434,6 +441,7 @@ class KitResponse(BaseModel):
 
 class DeliveryItemInput(BaseModel):
     epi_id: Optional[str] = None
+    epi_group_key: Optional[str] = None
     epi_variation_id: Optional[str] = None
     kit_id: Optional[str] = None
     quantity: int = 1

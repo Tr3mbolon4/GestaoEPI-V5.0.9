@@ -10,6 +10,30 @@ import { Button } from '@/components/ui/button';
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
+const normalizeText = (value) => (value ? String(value).trim().replace(/\s+/g, ' ') : '');
+const normalizeGroupText = (value) => normalizeText(value).toLowerCase();
+const stripSizeFromName = (name, size) => {
+  const base = normalizeText(name);
+  const normalizedSize = normalizeText(size);
+  if (!base || !normalizedSize) return base;
+  const suffixes = [` tamanho ${normalizedSize}`, ` tam ${normalizedSize}`, ` tam. ${normalizedSize}`, ` size ${normalizedSize}`];
+  const lowered = base.toLowerCase();
+  const matchedSuffix = suffixes.find((suffix) => lowered.endsWith(suffix.toLowerCase()));
+  if (matchedSuffix) return base.slice(0, base.length - matchedSuffix.length).trim();
+  const parts = base.split(' ');
+  if (parts.length > 1 && parts[parts.length - 1].toUpperCase() === normalizedSize.toUpperCase()) {
+    return parts.slice(0, -1).join(' ');
+  }
+  return base;
+};
+const getEpiGroupName = (epi) => stripSizeFromName(epi.name || epi.description, epi.size || epi.tamanho);
+const getEpiGroupKey = (epi) => [
+  getEpiGroupName(epi),
+  epi.category || epi.type_category,
+  epi.model || epi.modelo,
+  epi.brand || epi.marca
+].filter(Boolean).map(normalizeGroupText).join('|');
+
 export default function Kits() {
   const [kits, setKits] = useState([]);
   const [epis, setEpis] = useState([]);
@@ -27,10 +51,28 @@ export default function Kits() {
   });
   const [selectedEPI, setSelectedEPI] = useState('');
   const [epiQuantity, setEpiQuantity] = useState(1);
-  const kitEpis = epis.map((epi) => ({
-    ...epi,
-    baseLabel: [epi.name, epi.category || epi.type_category, epi.model].filter(Boolean).join(' - ')
-  }));
+  const kitEpis = Object.values(epis.reduce((groups, epi) => {
+    const groupKey = epi.epi_group_key || getEpiGroupKey(epi);
+    if (!groupKey) return groups;
+    if (!groups[groupKey]) {
+      groups[groupKey] = {
+        epi_group_key: groupKey,
+        epi_base_key: groupKey,
+        representative_epi_id: epi.id,
+        name: getEpiGroupName(epi),
+        description: epi.description,
+        category: epi.category || epi.type_category,
+        type_category: epi.type_category || epi.category,
+        model: epi.model || epi.modelo,
+        brand: epi.brand || epi.marca,
+        variations_count: 0,
+        available_stock: 0
+      };
+    }
+    groups[groupKey].variations_count += Math.max(1, epi.variations?.length || 0);
+    groups[groupKey].available_stock += epi.current_stock || 0;
+    return groups;
+  }, {})).sort((left, right) => (left.name || '').localeCompare(right.name || ''));
 
   useEffect(() => {
     fetchData();
@@ -57,22 +99,25 @@ export default function Kits() {
       toast.error('Selecione um EPI');
       return;
     }
-    const epi = epis.find(e => e.id === selectedEPI);
+    const epi = kitEpis.find(e => e.epi_group_key === selectedEPI);
     if (epi) {
-      if (formData.items.find(i => (i.epi_base_id || i.epi_id) === epi.id)) {
+      if (formData.items.find(i => (i.epi_group_key || i.epi_base_key) === epi.epi_group_key)) {
         toast.error('Este EPI já foi adicionado ao kit');
         return;
       }
       setFormData({
         ...formData,
         items: [...formData.items, { 
-          epi_base_id: epi.id,
-          epi_id: epi.id, 
+          epi_group_key: epi.epi_group_key,
+          epi_base_key: epi.epi_group_key,
+          epi_base_id: null,
+          epi_id: null,
           name: epi.name, 
           quantity: epiQuantity,
           description: epi.description,
           category: epi.category || epi.type_category,
           model: epi.model,
+          brand: epi.brand,
           type_category: epi.type_category
         }]
       });
@@ -118,7 +163,13 @@ export default function Kits() {
         sector: formData.sector,
         is_mandatory: formData.is_mandatory,
         items: formData.items.map(item => ({
-          epi_base_id: item.epi_base_id || item.epi_id,
+          epi_group_key: item.epi_group_key || item.epi_base_key,
+          name: item.name,
+          description: item.description,
+          category: item.category || item.type_category,
+          type_category: item.type_category || item.category,
+          model: item.model,
+          brand: item.brand,
           quantity: item.quantity
         }))
       };
@@ -144,19 +195,23 @@ export default function Kits() {
     const enrichedItems = (kit.items || []).map(item => {
       // Se o item já tem nome, usar os dados existentes
       if (item.name) {
-        return item;
+        const groupKey = item.epi_group_key || item.epi_base_key;
+        return { ...item, epi_group_key: groupKey, epi_base_key: groupKey };
       }
       // Se não tem nome, buscar do EPI correspondente
       const epi = epis.find(e => e.id === (item.epi_base_id || item.epi_id));
       if (epi) {
         return {
           ...item,
-          epi_base_id: epi.id,
-          epi_id: epi.id,
-          name: epi.name,
+          epi_group_key: getEpiGroupKey(epi),
+          epi_base_key: getEpiGroupKey(epi),
+          epi_base_id: null,
+          epi_id: null,
+          name: getEpiGroupName(epi),
           description: epi.description,
           category: epi.category || epi.type_category,
           model: epi.model,
+          brand: epi.brand,
           type_category: epi.type_category
         };
       }
@@ -376,8 +431,8 @@ export default function Kits() {
                     >
                       <option value="">Selecione um EPI...</option>
                       {kitEpis.map(epi => (
-                        <option key={epi.id} value={epi.id}>
-                          {epi.baseLabel || epi.name}
+                        <option key={epi.epi_group_key} value={epi.epi_group_key}>
+                          {[epi.name, epi.category || epi.type_category, epi.model, epi.brand].filter(Boolean).join(' - ')}
                         </option>
                       ))}
                     </select>

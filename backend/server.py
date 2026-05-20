@@ -1674,9 +1674,47 @@ def normalize_text(value: Optional[str]) -> Optional[str]:
     text = str(value).strip()
     return text or None
 
+def normalize_group_text(value: Optional[str]) -> str:
+    text = normalize_text(value) or ''
+    return ' '.join(text.lower().split())
+
 def normalize_size_value(value: Optional[str]) -> Optional[str]:
     text = normalize_text(value)
     return text.upper() if text else None
+
+def strip_size_from_epi_name(name: Optional[str], size: Optional[str]) -> str:
+    base = normalize_text(name) or ''
+    normalized_size = normalize_text(size)
+    if not base or not normalized_size:
+        return base
+
+    candidates = [
+        f" tamanho {normalized_size}",
+        f" tam {normalized_size}",
+        f" tam. {normalized_size}",
+        f" size {normalized_size}",
+    ]
+    lowered = base.lower()
+    for suffix in candidates:
+        if lowered.endswith(suffix.lower()):
+            return base[:len(base) - len(suffix)].strip()
+
+    parts = base.split()
+    if parts and parts[-1].upper() == normalized_size.upper():
+        return ' '.join(parts[:-1]).strip() or base
+    return base
+
+def get_epi_group_name(epi: dict) -> str:
+    return strip_size_from_epi_name(epi.get('name') or epi.get('description'), epi.get('size') or epi.get('tamanho'))
+
+def get_epi_group_key(epi: dict) -> str:
+    parts = [
+        get_epi_group_name(epi),
+        infer_epi_category(epi),
+        epi.get('model') or epi.get('modelo'),
+        epi.get('brand') or epi.get('marca'),
+    ]
+    return '|'.join(normalize_group_text(part) for part in parts if normalize_text(part))
 
 def infer_epi_category(epi: dict) -> str:
     return epi.get('category') or epi.get('type_category') or 'Sem categoria'
@@ -1746,6 +1784,44 @@ async def create_variation_from_legacy_epi(db, epi: dict) -> Optional[dict]:
 async def get_epi_variations(db, epi: dict) -> List[dict]:
     await create_variation_from_legacy_epi(db, epi)
     return await db.epi_variations.find({"epi_id": str(epi['_id'])}).to_list(200)
+
+async def get_epis_by_group_key(db, group_key: Optional[str]) -> List[dict]:
+    if not group_key:
+        return []
+    epis = await db.epis.find({}).to_list(5000)
+    return [epi for epi in epis if get_epi_group_key(epi) == group_key]
+
+async def build_epi_group_summary(db, group_key: str, fallback_item: Optional[dict] = None) -> Optional[dict]:
+    fallback_item = fallback_item or {}
+    group_epis = await get_epis_by_group_key(db, group_key)
+    seed = group_epis[0] if group_epis else (fallback_item or {})
+    if not seed:
+        return None
+
+    available_count = 0
+    variations_count = 0
+    for epi in group_epis:
+        variations = await get_epi_variations(db, epi)
+        variations_count += len(variations)
+        available_count += len([
+            variation for variation in variations
+            if (variation.get('current_stock', 0) or 0) > 0 and (variation.get('status') or 'ativo') != 'inativo'
+        ])
+
+    return {
+        "epi_group_key": group_key,
+        "epi_base_key": group_key,
+        "name": fallback_item.get('name') or get_epi_group_name(seed),
+        "description": fallback_item.get('description') or seed.get('description'),
+        "category": fallback_item.get('category') or infer_epi_category(seed),
+        "type_category": fallback_item.get('type_category') or infer_epi_category(seed),
+        "model": fallback_item.get('model') or seed.get('model'),
+        "modelo": fallback_item.get('model') or seed.get('model'),
+        "brand": fallback_item.get('brand') or seed.get('brand'),
+        "marca": fallback_item.get('brand') or seed.get('brand'),
+        "variations_count": variations_count,
+        "available_variations_count": available_count
+    }
 
 def serialize_epi_variation(variation: dict) -> dict:
     return {
@@ -1872,28 +1948,33 @@ async def build_epi_response(db, epi: dict) -> dict:
 async def build_kit_response(db, kit: dict) -> dict:
     response = doc_to_response(kit)
     items = []
+    grouped_items = {}
     for raw_item in kit.get('items', []):
+        group_key = raw_item.get('epi_group_key') or raw_item.get('epi_base_key')
         epi_base_id = raw_item.get('epi_base_id') or raw_item.get('epi_id')
-        item = {"epi_base_id": epi_base_id, "epi_id": epi_base_id, "quantity": raw_item.get('quantity', 1)}
-        if epi_base_id:
+        if not group_key and epi_base_id and ObjectId.is_valid(str(epi_base_id)):
             epi = await db.epis.find_one({"_id": ObjectId(epi_base_id)})
             if epi:
-                epi_data = await build_epi_response(db, epi)
-                item.update({
-                    "name": epi_data.get('name'),
-                    "description": epi_data.get('description'),
-                    "category": epi_data.get('category'),
-                    "type_category": epi_data.get('type_category'),
-                    "model": epi.get('model'),
-                    "modelo": epi.get('model'),
-                    "possui_variacao_tamanho": epi_data.get('possui_variacao_tamanho', False),
-                    "variations_count": len(epi_data.get('variations', [])),
-                    "available_variations_count": len([
-                        variation
-                        for variation in epi_data.get('variations', [])
-                        if (variation.get('current_stock', 0) or 0) > 0 and (variation.get('status') or 'ativo') != 'inativo'
-                    ])
-                })
+                group_key = get_epi_group_key(epi)
+
+        if not group_key:
+            continue
+        if group_key in grouped_items:
+            grouped_items[group_key]["quantity"] = max(grouped_items[group_key]["quantity"], raw_item.get('quantity', 1))
+            continue
+
+        summary = await build_epi_group_summary(db, group_key, raw_item)
+        if not summary:
+            continue
+        item = {
+            "epi_group_key": group_key,
+            "epi_base_key": group_key,
+            "epi_base_id": None,
+            "epi_id": None,
+            "quantity": raw_item.get('quantity', 1),
+            **summary
+        }
+        grouped_items[group_key] = item
         items.append(item)
     response['items'] = items
     return response
@@ -1944,47 +2025,79 @@ async def get_available_variations_for_delivery(db, epi: dict, require_stock: bo
         if not require_stock or (item.get('current_stock', 0) or 0) > 0
     ]
 
+async def get_available_group_variations_for_delivery(db, group_key: str, require_stock: bool = True) -> List[dict]:
+    variations = []
+    for epi in await get_epis_by_group_key(db, group_key):
+        variations.extend(await get_available_variations_for_delivery(db, epi, require_stock=require_stock))
+    return variations
+
+def choose_suggested_group_variation(variations: List[dict], requested_size: Optional[str] = None) -> Optional[dict]:
+    if not variations:
+        return None
+    desired_size = normalize_size_value(requested_size)
+    if desired_size:
+        exact = [item for item in variations if normalize_size_value(item.get('size')) == desired_size]
+        if exact:
+            return choose_primary_variation(exact)
+    generic = [item for item in variations if not normalize_size_value(item.get('size'))]
+    return choose_primary_variation(generic or variations)
+
 async def build_delivery_suggestions_for_kit(db, employee: dict, kit: dict) -> dict:
     items = []
+    processed_groups = set()
     for raw_item in kit.get('items', []):
+        group_key = raw_item.get('epi_group_key') or raw_item.get('epi_base_key')
         epi_base_id = raw_item.get('epi_base_id') or raw_item.get('epi_id')
-        if not epi_base_id:
+        epi = None
+        if not group_key and epi_base_id and ObjectId.is_valid(str(epi_base_id)):
+            epi = await db.epis.find_one({"_id": ObjectId(epi_base_id)})
+            if epi:
+                group_key = get_epi_group_key(epi)
+        if not group_key or group_key in processed_groups:
             continue
-        epi = await db.epis.find_one({"_id": ObjectId(epi_base_id)})
-        if not epi:
+        processed_groups.add(group_key)
+
+        summary = await build_epi_group_summary(db, group_key, raw_item)
+        if not summary:
             continue
-        epi_data = await build_epi_response(db, epi)
-        size_field = infer_employee_size_field(epi_data)
+        group_epis = await get_epis_by_group_key(db, group_key)
+        representative_epi = epi or (group_epis[0] if group_epis else None)
+        size_field = infer_employee_size_field(summary)
         requested_size = employee.get(size_field) if size_field else None
-        available_variations = await get_available_variations_for_delivery(db, epi, require_stock=True)
-        suggested_variation = await resolve_epi_variation(db, epi, employee=employee, require_stock=True)
+        available_variations = await get_available_group_variations_for_delivery(db, group_key, require_stock=True)
+        suggested_variation = choose_suggested_group_variation(available_variations, requested_size)
+        selected_variation = suggested_variation or (available_variations[0] if len(available_variations) == 1 else None)
         if available_variations:
             items.append({
-                "epi_base_id": epi_base_id,
-                "epi_id": epi_base_id,
-                "epi_variation_id": None,
-                "name": epi_data.get('name'),
-                "description": epi_data.get('description'),
-                "category": epi_data.get('category'),
-                "type_category": epi_data.get('type_category'),
+                "epi_group_key": group_key,
+                "epi_base_key": group_key,
+                "epi_base_id": None,
+                "epi_id": str(selected_variation.get('epi_id')) if selected_variation else (str(representative_epi['_id']) if representative_epi else None),
+                "epi_variation_id": str(selected_variation['_id']) if selected_variation and len(available_variations) == 1 else None,
+                "name": summary.get('name'),
+                "description": summary.get('description'),
+                "category": summary.get('category'),
+                "type_category": summary.get('type_category'),
                 "quantity": raw_item.get('quantity', 1),
                 "size_source": size_field,
                 "requested_size": requested_size,
                 "status": "available",
                 "message": "VariaÃ§Ã£o encontrada em estoque",
-                "requires_variation_selection": True,
+                "requires_variation_selection": len(available_variations) > 1,
                 "suggested_variation_id": str(suggested_variation['_id']) if suggested_variation else None,
                 "available_variations": [serialize_epi_variation(variation) for variation in available_variations],
-                "variation": serialize_epi_variation(suggested_variation) if suggested_variation else None
+                "variation": serialize_epi_variation(selected_variation) if selected_variation else None
             })
         else:
             items.append({
-                "epi_base_id": epi_base_id,
-                "epi_id": epi_base_id,
-                "name": epi_data.get('name'),
-                "description": epi_data.get('description'),
-                "category": epi_data.get('category'),
-                "type_category": epi_data.get('type_category'),
+                "epi_group_key": group_key,
+                "epi_base_key": group_key,
+                "epi_base_id": None,
+                "epi_id": str(representative_epi['_id']) if representative_epi else None,
+                "name": summary.get('name'),
+                "description": summary.get('description'),
+                "category": summary.get('category'),
+                "type_category": summary.get('type_category'),
                 "quantity": raw_item.get('quantity', 1),
                 "size_source": size_field,
                 "requested_size": requested_size,
@@ -2189,6 +2302,32 @@ async def delete_epi(epi_id: str, current_user: dict = Depends(require_role('adm
 
 # ===================== KITS =====================
 
+async def normalize_kit_items_for_storage(db, kit_items: List[KitItemInput]) -> List[dict]:
+    normalized_items = []
+    seen_groups = set()
+    for item in kit_items:
+        group_key = item.epi_group_key
+        representative_id = item.epi_base_id or item.epi_id
+        if not group_key and representative_id and ObjectId.is_valid(str(representative_id)):
+            epi = await db.epis.find_one({"_id": ObjectId(representative_id)})
+            if epi:
+                group_key = get_epi_group_key(epi)
+        if not group_key or group_key in seen_groups:
+            continue
+        seen_groups.add(group_key)
+        normalized_items.append({
+            'epi_group_key': group_key,
+            'epi_base_key': group_key,
+            'name': item.name,
+            'description': item.description,
+            'category': item.category or item.type_category,
+            'type_category': item.type_category or item.category,
+            'model': item.model,
+            'brand': item.brand,
+            'quantity': item.quantity
+        })
+    return normalized_items
+
 @api_router.get('/kits', response_model=List[KitResponse])
 async def get_kits(current_user: dict = Depends(require_role('admin', 'gestor', 'seguranca_trabalho', 'almoxarifado'))):
     db = await get_db()
@@ -2198,14 +2337,7 @@ async def get_kits(current_user: dict = Depends(require_role('admin', 'gestor', 
 @api_router.post('/kits', response_model=KitResponse, status_code=status.HTTP_201_CREATED)
 async def create_kit(kit_data: KitCreate, current_user: dict = Depends(require_role('admin', 'gestor', 'seguranca_trabalho'))):
     db = await get_db()
-    items = [
-        {
-            'epi_base_id': item.epi_base_id or item.epi_id,
-            'quantity': item.quantity
-        }
-        for item in kit_data.items
-        if item.epi_base_id or item.epi_id
-    ]
+    items = await normalize_kit_items_for_storage(db, kit_data.items)
     new_kit = {
         'name': kit_data.name,
         'description': kit_data.description,
@@ -2240,14 +2372,7 @@ async def update_kit(kit_id: str, kit_data: KitUpdate, current_user: dict = Depe
     if kit_data.is_mandatory is not None:
         update_data['is_mandatory'] = kit_data.is_mandatory
     if kit_data.items is not None:
-        update_data['items'] = [
-            {
-                'epi_base_id': item.epi_base_id or item.epi_id,
-                'quantity': item.quantity
-            }
-            for item in kit_data.items
-            if item.epi_base_id or item.epi_id
-        ]
+        update_data['items'] = await normalize_kit_items_for_storage(db, kit_data.items)
     update_data['updated_at'] = datetime.now(timezone.utc)
     result = await db.kits.find_one_and_update({'_id': ObjectId(kit_id)}, {'$set': update_data}, return_document=True)
     if not result:
@@ -2279,8 +2404,15 @@ async def create_delivery(delivery_data: DeliveryCreate, current_user: dict = De
     items_list = []
     for item in delivery_data.items:
         item_dict = item.model_dump()
-        if item.epi_id:
-            epi = await db.epis.find_one({'_id': ObjectId(item.epi_id)})
+        effective_epi_id = item.epi_id
+        preselected_variation = None
+        if item.epi_variation_id and ObjectId.is_valid(str(item.epi_variation_id)):
+            preselected_variation = await db.epi_variations.find_one({'_id': ObjectId(item.epi_variation_id)})
+            if preselected_variation:
+                effective_epi_id = str(preselected_variation.get('epi_id') or effective_epi_id)
+
+        if effective_epi_id:
+            epi = await db.epis.find_one({'_id': ObjectId(effective_epi_id)})
             if not epi:
                 raise HTTPException(status_code=404, detail='EPI n?o encontrado para entrega.')
 
@@ -2308,11 +2440,12 @@ async def create_delivery(delivery_data: DeliveryCreate, current_user: dict = De
 
             stock_change = item.quantity if delivery_data.is_return else -item.quantity
             await db.epi_variations.update_one({'_id': variation['_id']}, {'$inc': {'current_stock': stock_change}})
-            await sync_epi_stock_summary(db, item.epi_id)
+            await sync_epi_stock_summary(db, effective_epi_id)
 
             movement = {
                 'movement_type': 'return' if delivery_data.is_return else 'delivery',
-                'epi_id': item.epi_id,
+                'epi_id': effective_epi_id,
+                'epi_group_key': get_epi_group_key(epi),
                 'epi_variation_id': str(variation['_id']),
                 'quantity': item.quantity if delivery_data.is_return else -item.quantity,
                 'employee_id': delivery_data.employee_id,
@@ -2323,6 +2456,8 @@ async def create_delivery(delivery_data: DeliveryCreate, current_user: dict = De
 
             item_dict.update({
                 'epi_name': epi.get('name'),
+                'epi_id': effective_epi_id,
+                'epi_group_key': get_epi_group_key(epi),
                 'epi_variation_id': str(variation['_id']),
                 'brand': variation.get('brand'),
                 'model': variation.get('model'),
@@ -2542,22 +2677,33 @@ async def get_pending_epi_alerts(current_user: dict = Depends(get_current_user))
         
         # Buscar EPIs já entregues ao colaborador
         emp_deliveries = deliveries_by_employee.get(emp_id, [])
-        delivered_epi_ids = set()
+        delivered_group_keys = set()
         for d in emp_deliveries:
             for item in d.get('items', []):
-                if item.get('epi_id'):
-                    delivered_epi_ids.add(item.get('epi_id'))
+                if item.get('epi_group_key'):
+                    delivered_group_keys.add(item.get('epi_group_key'))
+                elif item.get('epi_id') and ObjectId.is_valid(str(item.get('epi_id'))):
+                    epi_doc = await db.epis.find_one({'_id': ObjectId(item.get('epi_id'))})
+                    if epi_doc:
+                        delivered_group_keys.add(get_epi_group_key(epi_doc))
+        delivered_epi_ids = delivered_group_keys
         
         # Verificar EPIs faltantes do kit
         missing_epis = []
         for kit_item in kit.get('items', []):
+            group_key = kit_item.get('epi_group_key') or kit_item.get('epi_base_key')
             epi_id = kit_item.get('epi_base_id') or kit_item.get('epi_id')
-            if epi_id and epi_id not in delivered_epi_ids:
+            epi_doc = None
+            if not group_key and epi_id and ObjectId.is_valid(str(epi_id)):
                 epi_doc = await db.epis.find_one({'_id': ObjectId(epi_id)})
+                if epi_doc:
+                    group_key = get_epi_group_key(epi_doc)
+            if group_key and group_key not in delivered_group_keys:
+                summary = await build_epi_group_summary(db, group_key, kit_item)
                 missing_epis.append({
-                    'epi_id': epi_id,
-                    'name': kit_item.get('name') or (epi_doc.get('name') if epi_doc else 'EPI'),
-                    'ca_number': kit_item.get('ca_number', '') or (epi_doc.get('ca_number', '') if epi_doc else ''),
+                    'epi_group_key': group_key,
+                    'name': (summary or {}).get('name') or kit_item.get('name') or 'EPI',
+                    'ca_number': '',
                     'quantity_required': kit_item.get('quantity', 1)
                 })
         
@@ -2698,11 +2844,16 @@ async def get_employee_alerts(employee_id: str, current_user: dict = Depends(get
             "is_return": False
         }).to_list(1000)
         
-        delivered_epi_ids = set()
+        delivered_group_keys = set()
         for d in deliveries:
             for item in d.get('items', []):
-                if item.get('epi_id'):
-                    delivered_epi_ids.add(item.get('epi_id'))
+                if item.get('epi_group_key'):
+                    delivered_group_keys.add(item.get('epi_group_key'))
+                elif item.get('epi_id') and ObjectId.is_valid(str(item.get('epi_id'))):
+                    epi_doc = await db.epis.find_one({'_id': ObjectId(item.get('epi_id'))})
+                    if epi_doc:
+                        delivered_group_keys.add(get_epi_group_key(epi_doc))
+        delivered_epi_ids = delivered_group_keys
         
         # Verificar EPIs faltantes
         for kit_item in kit.get('items', []):

@@ -1073,16 +1073,17 @@ export default function EntregaEPI() {
   };
 
   const mapSuggestionItemToSelectedItem = (item, kitName, kitId = '') => ({
-    epi_id: item.epi_id,
+    epi_id: item.variation?.epi_id || item.epi_id || '',
     epi_base_id: item.epi_base_id || item.epi_id,
-    epi_variation_id: '',
+    epi_group_key: item.epi_group_key || item.epi_base_key || '',
+    epi_variation_id: item.requires_variation_selection === false ? (item.epi_variation_id || item.variation?.id || '') : '',
     kit_id: kitId,
     name: item.name,
     quantity: item.quantity || 1,
-    size: '',
-    batch: '',
-    qr_code: '',
-    ca_number: '',
+    size: item.variation?.size || item.variation?.tamanho || '',
+    batch: item.variation?.batch || item.variation?.lote || '',
+    qr_code: item.variation?.qr_code || '',
+    ca_number: item.variation?.ca_number || item.variation?.ca || '',
     from_kit: kitName || item.kit_name || '',
     available_variations: item.available_variations || [],
     suggested_variation_id: item.suggested_variation_id || item.variation?.id || '',
@@ -1216,6 +1217,7 @@ export default function EntregaEPI() {
       const variation = (item.available_variations || []).find((entry) => entry.id === variationId);
       return {
         ...item,
+        epi_id: variation?.epi_id || item.epi_id,
         epi_variation_id: variationId,
         size: variation?.size || variation?.tamanho || '',
         batch: variation?.batch || variation?.lote || '',
