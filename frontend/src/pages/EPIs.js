@@ -29,6 +29,29 @@ const createEmptyVariation = () => ({
   batch: '',
   current_stock: 0
 });
+const normalizeText = (value) => (value ? String(value).trim().replace(/\s+/g, ' ') : '');
+const normalizeGroupText = (value) => normalizeText(value).toLowerCase();
+const stripSizeFromName = (name, size) => {
+  const base = normalizeText(name);
+  const normalizedSize = normalizeText(size);
+  if (!base || !normalizedSize) return base;
+  const suffixes = [` tamanho ${normalizedSize}`, ` tam ${normalizedSize}`, ` tam. ${normalizedSize}`, ` size ${normalizedSize}`];
+  const lowered = base.toLowerCase();
+  const matchedSuffix = suffixes.find((suffix) => lowered.endsWith(suffix.toLowerCase()));
+  if (matchedSuffix) return base.slice(0, base.length - matchedSuffix.length).trim();
+  const parts = base.split(' ');
+  if (parts.length > 1 && parts[parts.length - 1].toUpperCase() === normalizedSize.toUpperCase()) {
+    return parts.slice(0, -1).join(' ');
+  }
+  return base;
+};
+const getFallbackGroupName = (epi) => stripSizeFromName(epi.name || epi.description, epi.size || epi.tamanho);
+const getFallbackGroupKey = (epi) => [
+  getFallbackGroupName(epi),
+  epi.category || epi.type_category,
+  epi.model || epi.modelo,
+  epi.brand || epi.marca
+].filter(Boolean).map(normalizeGroupText).join('|');
 
 export default function EPIs() {
   const { user } = useAuth();
@@ -47,6 +70,9 @@ export default function EPIs() {
     description: '',
     obrigatorio_ca: true,
     possui_variacao_tamanho: false,
+    epi_group_key: '',
+    epi_group_name: '',
+    epi_group_mode: 'none',
     brand: '',
     model: '',
     color: '',
@@ -76,6 +102,16 @@ export default function EPIs() {
   });
   
   const isAdmin = user?.role === 'admin';
+  const epiGroups = Object.values(epis.reduce((groups, epi) => {
+    const key = epi.epi_group_key || getFallbackGroupKey(epi);
+    const name = epi.epi_group_name || getFallbackGroupName(epi);
+    if (!key || !name) return groups;
+    if (!groups[key]) {
+      groups[key] = { key, name, category: epi.category || epi.type_category, count: 0 };
+    }
+    groups[key].count += 1;
+    return groups;
+  }, {})).sort((left, right) => left.name.localeCompare(right.name));
 
   useEffect(() => {
     fetchData();
@@ -181,6 +217,14 @@ export default function EPIs() {
       toast.error('Cadastre ao menos uma varia??o com CA');
       return;
     }
+    if (formData.epi_group_mode === 'existing' && !formData.epi_group_key) {
+      toast.error('Selecione o grupo existente do EPI');
+      return;
+    }
+    if (formData.epi_group_mode === 'new' && !formData.epi_group_name.trim()) {
+      toast.error('Informe o nome do novo grupo do EPI');
+      return;
+    }
 
     try {
       const cleanData = {
@@ -191,6 +235,8 @@ export default function EPIs() {
         obrigatorio_ca: formData.obrigatorio_ca,
         nbr_number: formData.nbr_number || null,
         possui_variacao_tamanho: formData.possui_variacao_tamanho,
+        epi_group_key: formData.epi_group_mode === 'existing' ? formData.epi_group_key || null : null,
+        epi_group_name: formData.epi_group_mode === 'new' || formData.epi_group_mode === 'existing' ? formData.epi_group_name || null : null,
         technical_standard: formData.technical_standard || null,
         storage_location: formData.storage_location || null,
         min_stock: parseInt(formData.min_stock) || 0,
@@ -238,6 +284,9 @@ export default function EPIs() {
       description: epi.description || '',
       obrigatorio_ca: epi.obrigatorio_ca !== false,
       possui_variacao_tamanho: epi.possui_variacao_tamanho || false,
+      epi_group_key: epi.epi_group_key || '',
+      epi_group_name: epi.epi_group_name || '',
+      epi_group_mode: epi.epi_group_key ? 'existing' : 'none',
       brand: primaryVariation?.brand || epi.brand || '',
       model: primaryVariation?.model || epi.model || '',
       color: primaryVariation?.color || epi.color || '',
@@ -419,6 +468,9 @@ export default function EPIs() {
       description: '',
       obrigatorio_ca: true,
       possui_variacao_tamanho: false,
+      epi_group_key: '',
+      epi_group_name: '',
+      epi_group_mode: 'none',
       brand: '',
       model: '',
       color: '',
@@ -570,6 +622,75 @@ export default function EPIs() {
                       <option value="Audição">Audição</option>
                       <option value="Queda">Queda</option>
                     </select>
+                  </div>
+                  <div className="col-span-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <input
+                        type="checkbox"
+                        checked={formData.possui_variacao_tamanho}
+                        onChange={(e) => setFormData({ ...formData, possui_variacao_tamanho: e.target.checked })}
+                        className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                      />
+                      <span className="text-sm font-medium text-slate-800">Possui variacao de tamanho ou lote</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-sm font-medium mb-1">Grupo do EPI</label>
+                        <select
+                          value={formData.epi_group_mode}
+                          onChange={(e) => {
+                            const mode = e.target.value;
+                            setFormData({
+                              ...formData,
+                              epi_group_mode: mode,
+                              epi_group_key: mode === 'existing' ? formData.epi_group_key : '',
+                              epi_group_name: mode === 'new' ? formData.epi_group_name : ''
+                            });
+                          }}
+                          className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                        >
+                          <option value="none">Agrupar automaticamente</option>
+                          <option value="existing">Usar grupo existente</option>
+                          <option value="new">Criar novo grupo</option>
+                        </select>
+                      </div>
+                      {formData.epi_group_mode === 'existing' && (
+                        <div className="md:col-span-2">
+                          <label className="block text-sm font-medium mb-1">Grupo existente</label>
+                          <select
+                            value={formData.epi_group_key}
+                            onChange={(e) => {
+                              const selected = epiGroups.find((group) => group.key === e.target.value);
+                              setFormData({
+                                ...formData,
+                                epi_group_key: e.target.value,
+                                epi_group_name: selected?.name || ''
+                              });
+                            }}
+                            className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                          >
+                            <option value="">Selecione um grupo...</option>
+                            {epiGroups.map((group) => (
+                              <option key={group.key} value={group.key}>
+                                {group.name} {group.category ? `- ${group.category}` : ''} ({group.count})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      {formData.epi_group_mode === 'new' && (
+                        <div className="md:col-span-2">
+                          <label className="block text-sm font-medium mb-1">Nome do novo grupo</label>
+                          <input
+                            type="text"
+                            value={formData.epi_group_name}
+                            onChange={(e) => setFormData({ ...formData, epi_group_name: e.target.value })}
+                            className="flex h-10 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                            placeholder="Ex: Bota Bico PVC"
+                          />
+                        </div>
+                      )}
+                    </div>
                   </div>
                   <div>
                     <label className="block text-sm font-medium mb-1">CA (Certificado)</label>

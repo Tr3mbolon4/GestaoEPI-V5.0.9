@@ -279,6 +279,8 @@ class EPICreate(BaseModel):
     obrigatorio_ca: bool = True
     nbr: Optional[str] = None
     possui_variacao_tamanho: bool = False
+    epi_group_key: Optional[str] = None
+    epi_group_name: Optional[str] = None
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None
@@ -325,6 +327,8 @@ class EPIUpdate(BaseModel):
     obrigatorio_ca: Optional[bool] = None
     nbr: Optional[str] = None
     possui_variacao_tamanho: Optional[bool] = None
+    epi_group_key: Optional[str] = None
+    epi_group_name: Optional[str] = None
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None
@@ -365,6 +369,8 @@ class EPIResponse(BaseModel):
     obrigatorio_ca: bool = True
     nbr: Optional[str] = None
     possui_variacao_tamanho: bool = False
+    epi_group_key: Optional[str] = None
+    epi_group_name: Optional[str] = None
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None

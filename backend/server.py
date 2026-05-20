@@ -15,6 +15,8 @@ import logging
 import base64
 import json
 import io
+import re
+import unicodedata
 
 # Para importação de Excel
 from openpyxl import Workbook, load_workbook
@@ -1705,9 +1707,12 @@ def strip_size_from_epi_name(name: Optional[str], size: Optional[str]) -> str:
     return base
 
 def get_epi_group_name(epi: dict) -> str:
-    return strip_size_from_epi_name(epi.get('name') or epi.get('description'), epi.get('size') or epi.get('tamanho'))
+    return normalize_text(epi.get('epi_group_name')) or strip_size_from_epi_name(epi.get('name') or epi.get('description'), epi.get('size') or epi.get('tamanho'))
 
 def get_epi_group_key(epi: dict) -> str:
+    explicit_key = normalize_text(epi.get('epi_group_key'))
+    if explicit_key:
+        return explicit_key
     parts = [
         get_epi_group_name(epi),
         infer_epi_category(epi),
@@ -1715,6 +1720,38 @@ def get_epi_group_key(epi: dict) -> str:
         epi.get('brand') or epi.get('marca'),
     ]
     return '|'.join(normalize_group_text(part) for part in parts if normalize_text(part))
+
+def slugify_group_key(value: str) -> str:
+    normalized = unicodedata.normalize('NFKD', value or '')
+    ascii_text = normalized.encode('ascii', 'ignore').decode('ascii')
+    slug = re.sub(r'[^A-Za-z0-9]+', '-', ascii_text.upper()).strip('-')
+    return slug or 'EPI'
+
+async def generate_unique_epi_group_key(db, group_name: str) -> str:
+    base = slugify_group_key(group_name)
+    existing_keys = {
+        epi.get('epi_group_key')
+        for epi in await db.epis.find({"epi_group_key": {"$regex": f"^{base}-", "$options": "i"}}).to_list(1000)
+        if epi.get('epi_group_key')
+    }
+    index = 1
+    while True:
+        candidate = f"{base}-{index:03d}"
+        if candidate not in existing_keys:
+            return candidate
+        index += 1
+
+async def resolve_epi_group_fields(db, payload: dict, fallback_name: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    group_key = normalize_text(payload.get('epi_group_key'))
+    group_name = normalize_text(payload.get('epi_group_name'))
+    if group_key:
+        if not group_name:
+            existing = await db.epis.find_one({"epi_group_key": group_key})
+            group_name = existing.get('epi_group_name') if existing else fallback_name
+        return group_key, group_name
+    if group_name:
+        return await generate_unique_epi_group_key(db, group_name), group_name
+    return None, None
 
 def infer_epi_category(epi: dict) -> str:
     return epi.get('category') or epi.get('type_category') or 'Sem categoria'
@@ -1812,6 +1849,7 @@ async def build_epi_group_summary(db, group_key: str, fallback_item: Optional[di
         "epi_group_key": group_key,
         "epi_base_key": group_key,
         "name": fallback_item.get('name') or get_epi_group_name(seed),
+        "epi_group_name": fallback_item.get('epi_group_name') or get_epi_group_name(seed),
         "description": fallback_item.get('description') or seed.get('description'),
         "category": fallback_item.get('category') or infer_epi_category(seed),
         "type_category": fallback_item.get('type_category') or infer_epi_category(seed),
@@ -1911,6 +1949,8 @@ async def build_epi_response(db, epi: dict) -> dict:
         "nbr": infer_epi_nbr(epi),
         "nbr_number": infer_epi_nbr(epi),
         "possui_variacao_tamanho": infer_epi_has_size(epi, variations),
+        "epi_group_key": epi.get('epi_group_key'),
+        "epi_group_name": epi.get('epi_group_name'),
         "variations": serialized_variations,
         "current_stock": total_stock,
         "quantity_purchased": total_purchased,
@@ -2153,6 +2193,7 @@ async def create_epi(epi_data: EPICreate, current_user: dict = Depends(require_r
     variations_payload = payload.pop('variations', []) or []
     category = payload.get('category') or payload.get('type_category')
     nbr = payload.get('nbr') or payload.get('nbr_number')
+    epi_group_key, epi_group_name = await resolve_epi_group_fields(db, payload, payload.get('name'))
 
     if payload.get('obrigatorio_ca', True):
         if not variations_payload and not payload.get('ca_number'):
@@ -2170,6 +2211,8 @@ async def create_epi(epi_data: EPICreate, current_user: dict = Depends(require_r
         'nbr': nbr,
         'nbr_number': nbr,
         'possui_variacao_tamanho': payload.get('possui_variacao_tamanho', False),
+        'epi_group_key': epi_group_key,
+        'epi_group_name': epi_group_name,
         'min_stock': payload.get('min_stock', 0),
         'max_stock': payload.get('max_stock'),
         'replacement_period': str(payload['replacement_period'].value) if payload.get('replacement_period') else None,
@@ -2249,6 +2292,14 @@ async def update_epi(epi_id: str, epi_data: EPIUpdate, current_user: dict = Depe
         nbr = update_data.get('nbr') or update_data.get('nbr_number')
         update_data['nbr'] = nbr
         update_data['nbr_number'] = nbr
+    if 'epi_group_key' in update_data or 'epi_group_name' in update_data:
+        group_key, group_name = await resolve_epi_group_fields(
+            db,
+            {**existing, **update_data},
+            update_data.get('name') or existing.get('name')
+        )
+        update_data['epi_group_key'] = group_key
+        update_data['epi_group_name'] = group_name
     if update_data.get('replacement_period'):
         update_data['replacement_period'] = str(update_data['replacement_period'].value) if hasattr(update_data['replacement_period'], 'value') else str(update_data['replacement_period'])
 
