@@ -90,6 +90,30 @@ def doc_to_response(doc, id_field='id'):
     result[id_field] = str(doc['_id'])
     return result
 
+def parse_datetime_safe(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except Exception:
+            return None
+    return None
+
+def ensure_aware_datetime(value):
+    parsed = parse_datetime_safe(value)
+    if not parsed:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+def format_datetime_safe(value, fmt='%d/%m/%Y %H:%M', fallback='-'):
+    parsed = ensure_aware_datetime(value)
+    return parsed.strftime(fmt) if parsed else fallback
+
 def format_facial_template_response(doc):
     if doc is None:
         return None
@@ -131,12 +155,16 @@ def build_biometric_summary(employee: dict, templates: List[dict]) -> dict:
         status_key = "missing"
         status_label = "Nao cadastrada"
 
-    dates = [template.get("created_at") for template in valid_templates if template.get("created_at")]
+    dates = [
+        ensure_aware_datetime(template.get("created_at"))
+        for template in valid_templates
+        if ensure_aware_datetime(template.get("created_at"))
+    ]
     quality_scores = [float(template.get("quality_score") or 0) for template in valid_templates]
     avg_quality = round(sum(quality_scores) / len(quality_scores), 4) if quality_scores else 0
     latest_template = sorted(
         valid_templates,
-        key=lambda template: template.get("created_at") or datetime.min.replace(tzinfo=timezone.utc),
+        key=lambda template: ensure_aware_datetime(template.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True
     )[0] if valid_templates else None
 
@@ -175,13 +203,10 @@ async def get_biometric_summaries(db, employees: List[dict]) -> dict:
 
 def check_password_expired(user):
     """Verifica se a senha expirou (mais de 30 dias)"""
-    password_changed_at = user.get('password_changed_at')
+    password_changed_at = ensure_aware_datetime(user.get('password_changed_at'))
     if not password_changed_at:
         return False
-    
-    if password_changed_at.tzinfo is None:
-        password_changed_at = password_changed_at.replace(tzinfo=timezone.utc)
-    
+
     expiry_date = password_changed_at + timedelta(days=PASSWORD_EXPIRY_DAYS)
     return datetime.now(timezone.utc) > expiry_date
 
@@ -272,9 +297,9 @@ async def login(request: LoginRequest):
     license_doc = await db.panel_license.find_one({})
     if license_doc:
         now = datetime.now(timezone.utc)
-        expires_at = license_doc['expires_at']
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = ensure_aware_datetime(license_doc.get('expires_at'))
+        if not expires_at:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Licenca invalida')
         if now > expires_at and user['role'] != 'admin':
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail='Licença expirada')
     
@@ -918,7 +943,7 @@ async def generate_deliveries_pdf(
         facial_str = f"{int(facial_match * 100)}%" if facial_match else 'N/A'
         
         data.append([
-            delivery.get('created_at', datetime.now()).strftime('%d/%m/%Y %H:%M'),
+            format_datetime_safe(delivery.get('created_at'), '%d/%m/%Y %H:%M'),
             delivery.get('employee_name', '')[:25],
             items_str,
             'Devolução' if delivery.get('is_return') else 'Entrega',
@@ -1027,7 +1052,7 @@ async def generate_employee_history_pdf(employee_id: str, current_user: dict = D
             responsavel = delivery.get('delivered_by_name', '-')
             
             history_data.append([
-                delivery.get('created_at', datetime.now()).strftime('%d/%m/%Y'),
+                format_datetime_safe(delivery.get('created_at'), '%d/%m/%Y'),
                 'Devolução' if delivery.get('is_return') else 'Entrega',
                 items_str,
                 responsavel[:20],  # Limitar tamanho do nome
@@ -1795,9 +1820,10 @@ async def build_epi_response(db, epi: dict) -> dict:
     total_stock = sum(item.get('current_stock', 0) or 0 for item in variations)
     total_purchased = sum(item.get('quantity_purchased', 0) or 0 for item in variations)
     validity_candidates = [
-        item.get('validity_date') or item.get('ca_validity')
+        parsed_date
         for item in variations
-        if item.get('validity_date') or item.get('ca_validity')
+        for parsed_date in [ensure_aware_datetime(item.get('validity_date') or item.get('ca_validity'))]
+        if parsed_date
     ]
     validity_date = min(validity_candidates) if validity_candidates else None
     response = doc_to_response(epi)
@@ -1986,11 +2012,8 @@ def calculate_epi_status(epi):
         stock_status = 'low'
     
     # Status de validade
-    validity_date = epi.get('validity_date') or epi.get('ca_validity')
+    validity_date = ensure_aware_datetime(epi.get('validity_date') or epi.get('ca_validity'))
     if validity_date:
-        if validity_date.tzinfo is None:
-            validity_date = validity_date.replace(tzinfo=timezone.utc)
-        
         now = datetime.now(timezone.utc)
         days_until_expiry = (validity_date - now).days
         
@@ -2434,15 +2457,15 @@ async def get_license(current_user: dict = Depends(require_role('admin'))):
         raise HTTPException(status_code=404, detail='Licença não encontrada')
     
     now = datetime.now(timezone.utc)
-    expires_at = license_doc['expires_at']
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    expires_at = ensure_aware_datetime(license_doc.get('expires_at'))
+    if not expires_at:
+        raise HTTPException(status_code=500, detail='Licenca com validade invalida')
     
     days_remaining = max(0, (expires_at - now).days)
     
     return LicenseResponse(
         id=str(license_doc['_id']),
-        expires_at=license_doc['expires_at'],
+        expires_at=expires_at,
         is_blocked=license_doc.get('is_blocked', False),
         days_remaining=days_remaining
     )
@@ -2595,7 +2618,7 @@ async def get_replacement_due_alerts(current_user: dict = Depends(get_current_us
     for result in results:
         emp_id = result['_id']['employee_id']
         epi_id = result['_id']['epi_id']
-        last_delivery = result['last_delivery']
+        last_delivery = ensure_aware_datetime(result.get('last_delivery'))
         
         if epi_id not in epi_periods:
             continue
@@ -2606,9 +2629,8 @@ async def get_replacement_due_alerts(current_user: dict = Depends(get_current_us
         if replacement_days is None:
             continue
         
-        # Calcular data de vencimento da troca
-        if last_delivery.tzinfo is None:
-            last_delivery = last_delivery.replace(tzinfo=timezone.utc)
+        if not last_delivery:
+            continue
         
         due_date = last_delivery + timedelta(days=replacement_days)
         
@@ -2718,7 +2740,7 @@ async def get_employee_alerts(employee_id: str, current_user: dict = Depends(get
         
         for result in results:
             epi_id = result['_id']
-            last_delivery = result['last_delivery']
+            last_delivery = ensure_aware_datetime(result.get('last_delivery'))
             
             if epi_id not in epi_periods:
                 continue
@@ -2729,8 +2751,8 @@ async def get_employee_alerts(employee_id: str, current_user: dict = Depends(get
             if replacement_days is None:
                 continue
             
-            if last_delivery.tzinfo is None:
-                last_delivery = last_delivery.replace(tzinfo=timezone.utc)
+            if not last_delivery:
+                continue
             
             due_date = last_delivery + timedelta(days=replacement_days)
             
