@@ -31,6 +31,26 @@ const createEmptyVariation = () => ({
 });
 const normalizeText = (value) => (value ? String(value).trim().replace(/\s+/g, ' ') : '');
 const normalizeGroupText = (value) => normalizeText(value).toLowerCase();
+const hasPositiveNumericValue = (value) => value !== '' && value !== null && value !== undefined && Number(value) > 0;
+const parseIntegerValue = (value) => {
+  const parsed = parseInt(value, 10);
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+const parseDecimalValue = (value) => {
+  const parsed = parseFloat(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+};
+const hasVariationData = (variation) => (
+  normalizeText(variation.brand) ||
+  normalizeText(variation.model) ||
+  normalizeText(variation.ca_number) ||
+  normalizeText(variation.size) ||
+  normalizeText(variation.batch) ||
+  normalizeText(variation.qr_code) ||
+  normalizeText(variation.internal_code) ||
+  hasPositiveNumericValue(variation.current_stock) ||
+  hasPositiveNumericValue(variation.quantity_purchased)
+);
 const stripSizeFromName = (name, size) => {
   const base = normalizeText(name);
   const normalizedSize = normalizeText(size);
@@ -183,35 +203,36 @@ export default function EPIs() {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    const variations = [
-      {
-        brand: formData.brand,
-        model: formData.model,
-        color: formData.color,
-        size: formData.size,
-        material: formData.material,
-        ca_number: formData.ca_number,
-        ca_validity: formData.ca_validity || null,
-        supplier_id: formData.supplier_id || null,
-        invoice_number: formData.invoice_number || null,
-        purchase_date: formData.purchase_date || null,
-        quantity_purchased: parseInt(formData.quantity_purchased) || 0,
-        unit_price: parseFloat(formData.unit_price) || 0,
-        validity_date: formData.validity_date || null,
-        qr_code: formData.qr_code || null,
-        internal_code: formData.internal_code || null,
-        batch: formData.batch || null,
-        current_stock: parseInt(formData.current_stock) || 0
-      },
-      ...formData.extraVariations
-    ].filter((variation) => (
-      variation.brand ||
-      variation.model ||
-      variation.ca_number ||
-      variation.size ||
-      variation.batch ||
-      variation.current_stock
-    ));
+    const primaryVariation = {
+      brand: formData.brand,
+      model: formData.model,
+      color: formData.color,
+      size: formData.size,
+      material: formData.material,
+      ca_number: formData.ca_number,
+      ca_validity: formData.ca_validity || null,
+      supplier_id: formData.supplier_id || null,
+      invoice_number: formData.invoice_number || null,
+      purchase_date: formData.purchase_date || null,
+      quantity_purchased: parseIntegerValue(formData.quantity_purchased),
+      unit_price: parseDecimalValue(formData.unit_price),
+      validity_date: formData.validity_date || null,
+      qr_code: formData.qr_code || null,
+      internal_code: formData.internal_code || null,
+      batch: formData.batch || null,
+      current_stock: parseIntegerValue(formData.current_stock)
+    };
+
+    const extraVariations = formData.extraVariations
+      .filter(hasVariationData)
+      .map((variation) => ({
+        ...variation,
+        quantity_purchased: parseIntegerValue(variation.quantity_purchased),
+        unit_price: parseDecimalValue(variation.unit_price),
+        current_stock: parseIntegerValue(variation.current_stock)
+      }));
+
+    const variations = [primaryVariation, ...extraVariations];
 
     if (formData.obrigatorio_ca && !variations.some((variation) => variation.ca_number)) {
       toast.error('Cadastre ao menos uma varia??o com CA');
@@ -299,16 +320,16 @@ export default function EPIs() {
       supplier_id: primaryVariation?.supplier_id || epi.supplier_id || '',
       invoice_number: primaryVariation?.invoice_number || epi.invoice_number || '',
       purchase_date: (primaryVariation?.purchase_date || epi.purchase_date) ? (primaryVariation?.purchase_date || epi.purchase_date).split('T')[0] : '',
-      quantity_purchased: primaryVariation?.quantity_purchased || epi.quantity_purchased || 0,
-      unit_price: primaryVariation?.unit_price || epi.unit_price || 0,
+      quantity_purchased: primaryVariation?.quantity_purchased ?? epi.quantity_purchased ?? 0,
+      unit_price: primaryVariation?.unit_price ?? epi.unit_price ?? 0,
       validity_date: (primaryVariation?.validity_date || epi.validity_date) ? (primaryVariation?.validity_date || epi.validity_date).split('T')[0] : '',
       qr_code: primaryVariation?.qr_code || epi.qr_code || '',
       internal_code: primaryVariation?.internal_code || epi.internal_code || '',
       batch: primaryVariation?.batch || epi.batch || '',
       storage_location: epi.storage_location || '',
-      current_stock: primaryVariation?.current_stock || epi.current_stock || 0,
-      min_stock: epi.min_stock || 0,
-      max_stock: epi.max_stock || 0,
+      current_stock: primaryVariation?.current_stock ?? epi.current_stock ?? 0,
+      min_stock: epi.min_stock ?? 0,
+      max_stock: epi.max_stock ?? 0,
       // NOVOS: Periodicidade de troca
       replacement_period: epi.replacement_period || '',
       replacement_days: epi.replacement_days || '',
@@ -323,13 +344,13 @@ export default function EPIs() {
         supplier_id: variation.supplier_id || '',
         invoice_number: variation.invoice_number || '',
         purchase_date: variation.purchase_date ? variation.purchase_date.split('T')[0] : '',
-        quantity_purchased: variation.quantity_purchased || 0,
-        unit_price: variation.unit_price || 0,
+        quantity_purchased: variation.quantity_purchased ?? 0,
+        unit_price: variation.unit_price ?? 0,
         validity_date: variation.validity_date ? variation.validity_date.split('T')[0] : '',
         qr_code: variation.qr_code || '',
         internal_code: variation.internal_code || '',
         batch: variation.batch || '',
-        current_stock: variation.current_stock || 0
+        current_stock: variation.current_stock ?? 0
       }))
     });
     setShowDialog(true);

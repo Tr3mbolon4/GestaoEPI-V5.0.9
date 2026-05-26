@@ -104,6 +104,23 @@ def parse_datetime_safe(value):
             return None
     return None
 
+def parse_int_safe(value, default=0):
+    if value is None or value == '':
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+def get_variation_stock_quantity(raw_variation):
+    quantity = raw_variation.get('quantidade_estoque')
+    if quantity is None:
+        quantity = raw_variation.get('current_stock')
+    return parse_int_safe(quantity, 0)
+
 def ensure_aware_datetime(value):
     parsed = parse_datetime_safe(value)
     if not parsed:
@@ -2234,7 +2251,7 @@ async def create_epi(epi_data: EPICreate, current_user: dict = Depends(require_r
 
     for raw_variation in variations_payload:
         supplier_id = raw_variation.get('supplier_id')
-        quantity = raw_variation.get('quantidade_estoque', raw_variation.get('current_stock', 0) or 0)
+        quantity = get_variation_stock_quantity(raw_variation)
         variation = {
             'epi_id': str(result.inserted_id),
             'brand': raw_variation.get('marca') or raw_variation.get('brand'),
@@ -2256,7 +2273,7 @@ async def create_epi(epi_data: EPICreate, current_user: dict = Depends(require_r
             'validity_date': raw_variation.get('validity_date'),
             'material': raw_variation.get('material'),
             'technical_standard': raw_variation.get('technical_standard'),
-            'quantity_purchased': raw_variation.get('quantity_purchased', quantity),
+            'quantity_purchased': parse_int_safe(raw_variation.get('quantity_purchased'), quantity),
             'created_at': now,
             'updated_at': now
         }
@@ -2310,7 +2327,7 @@ async def update_epi(epi_id: str, epi_data: EPIUpdate, current_user: dict = Depe
         now = datetime.now(timezone.utc)
         for raw_variation in epi_data.variations:
             supplier_id = raw_variation.get('supplier_id')
-            quantity = raw_variation.get('quantidade_estoque', raw_variation.get('current_stock', 0) or 0)
+            quantity = get_variation_stock_quantity(raw_variation)
             variation = {
                 'epi_id': epi_id,
                 'brand': raw_variation.get('marca') or raw_variation.get('brand'),
@@ -2332,7 +2349,7 @@ async def update_epi(epi_id: str, epi_data: EPIUpdate, current_user: dict = Depe
                 'validity_date': raw_variation.get('validity_date'),
                 'material': raw_variation.get('material'),
                 'technical_standard': raw_variation.get('technical_standard'),
-                'quantity_purchased': raw_variation.get('quantity_purchased', quantity),
+                'quantity_purchased': parse_int_safe(raw_variation.get('quantity_purchased'), quantity),
                 'created_at': now,
                 'updated_at': now
             }
