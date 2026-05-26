@@ -529,7 +529,8 @@ export default function Kits() {
           </div>
         ) : (
           <div className="bg-white border border-slate-200 rounded-lg shadow-sm overflow-hidden">
-            <table className="w-full">
+            <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px]">
               <thead className="bg-slate-50 border-b border-slate-200">
                 <tr>
                   <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase">Nome</th>
@@ -593,6 +594,7 @@ export default function Kits() {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         )}
 

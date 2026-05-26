@@ -7,9 +7,9 @@ export const DashboardLayout = ({ children }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
+    <div className="flex min-h-dvh w-full overflow-x-hidden bg-slate-50 lg:h-dvh lg:overflow-hidden">
       {/* Sidebar Desktop */}
-      <div className="hidden lg:block">
+      <div className="hidden lg:block lg:h-dvh lg:flex-shrink-0">
         <Sidebar />
       </div>
       
@@ -30,7 +30,7 @@ export const DashboardLayout = ({ children }) => {
       </div>
       
       {/* Main Content */}
-      <main className="flex-1 overflow-auto">
+      <main className="min-h-dvh w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto lg:h-dvh">
         {/* Mobile Header */}
         <div className="lg:hidden sticky top-0 z-30 bg-slate-900 p-4 flex items-center justify-between">
           <button
@@ -55,7 +55,7 @@ export const DashboardLayout = ({ children }) => {
         </div>
         
         {/* Page Content */}
-        <div className="p-4 sm:p-6 lg:p-8">
+        <div className="w-full max-w-full p-4 sm:p-6 lg:p-8">
           {children}
         </div>
       </main>

@@ -108,8 +108,8 @@ export const Sidebar = ({ onClose }) => {
   };
 
   return (
-    <div className="w-64 bg-slate-900 min-h-screen flex flex-col" data-testid="sidebar">
-      <div className="p-6 border-b border-slate-800">
+    <div className="flex h-dvh min-h-0 w-64 flex-shrink-0 flex-col overflow-hidden bg-slate-900" data-testid="sidebar">
+      <div className="flex-shrink-0 p-6 border-b border-slate-800">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-md overflow-hidden bg-white flex items-center justify-center flex-shrink-0">
@@ -141,7 +141,7 @@ export const Sidebar = ({ onClose }) => {
         </div>
       </div>
 
-      <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
+      <nav className="min-h-0 flex-1 p-4 space-y-1 overflow-y-auto">
         {filteredMenu.map((item) => {
           const Icon = item.icon;
           const isActive = location.pathname === item.path;
@@ -172,7 +172,7 @@ export const Sidebar = ({ onClose }) => {
         })}
       </nav>
 
-      <div className="p-4 border-t border-slate-800">
+      <div className="flex-shrink-0 p-4 border-t border-slate-800">
         <div className="flex items-center gap-3 mb-3 px-3 py-2">
           <div className="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center text-white font-medium text-sm">
             {user?.username?.[0]?.toUpperCase() || 'U'}
