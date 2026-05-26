@@ -15,14 +15,15 @@ const API = `${BACKEND_URL}/api`;
 
 const getBiometricStatus = (colaborador) => {
   const status = colaborador.biometric?.status || colaborador.biometric_status || 'missing';
-  const count = colaborador.biometric?.templates_count ?? colaborador.biometric_templates_count ?? 0;
+  const count = Math.max(0, colaborador.biometric?.templates_count ?? colaborador.biometric_templates_count ?? 0);
+  const countLabel = `${Math.min(count, 3)}/3`;
   if (status === 'registered' || count >= 3) {
-    return { label: 'Cadastrada', color: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500', count };
+    return { label: 'Cadastrada', color: 'bg-emerald-100 text-emerald-700', dot: 'bg-emerald-500', count, countLabel };
   }
   if (status === 'incomplete' || count > 0) {
-    return { label: 'Incompleta', color: 'bg-amber-100 text-amber-700', dot: 'bg-amber-500', count };
+    return { label: 'Incompleta', color: 'bg-amber-100 text-amber-700', dot: 'bg-amber-500', count, countLabel };
   }
-  return { label: 'Nao cadastrada', color: 'bg-red-100 text-red-700', dot: 'bg-red-500', count: 0 };
+  return { label: 'Nao cadastrada', color: 'bg-red-100 text-red-700', dot: 'bg-red-500', count: 0, countLabel: '0/3' };
 };
 
 // Componente de Avatar com fallback robusto para erro de carregamento
@@ -1020,7 +1021,7 @@ export default function Colaboradores() {
                           return (
                             <div className={`mt-2 inline-flex items-center gap-2 px-2 py-1 rounded-full text-xs font-medium ${biometric.color}`}>
                               <span className={`w-2 h-2 rounded-full ${biometric.dot}`}></span>
-                              {biometric.label} ({biometric.count})
+                              {biometric.label} ({biometric.countLabel})
                             </div>
                           );
                         })()}
@@ -1081,7 +1082,7 @@ export default function Colaboradores() {
                             <span className={`inline-flex items-center gap-2 px-2 py-1 rounded-full text-xs font-medium ${biometric.color}`}>
                               <span className={`w-2 h-2 rounded-full ${biometric.dot}`}></span>
                               {biometric.label}
-                              <span className="text-[11px] opacity-75">({biometric.count})</span>
+                              <span className="text-[11px] opacity-75">({biometric.countLabel})</span>
                             </span>
                           );
                         })()}

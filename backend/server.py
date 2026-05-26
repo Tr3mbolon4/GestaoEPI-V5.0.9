@@ -158,12 +158,35 @@ def biometric_quality_label(quality_score: Optional[float]) -> str:
         return "Regular"
     return "Ruim"
 
+def has_registered_facial_template(template: dict) -> bool:
+    descriptor = template.get("descriptor")
+    if descriptor is None:
+        return False
+    if isinstance(descriptor, str):
+        stripped = descriptor.strip()
+        if not stripped:
+            return False
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return len(parsed) > 0
+        except Exception:
+            pass
+        return True
+    if isinstance(descriptor, (list, tuple)):
+        return len(descriptor) > 0
+    return True
+
 def build_biometric_summary(employee: dict, templates: List[dict]) -> dict:
-    valid_templates = [
+    registered_templates = [
+        template for template in templates
+        if has_registered_facial_template(template)
+    ]
+    compatible_templates = [
         template for template in templates
         if face_recognition_service.is_descriptor_compatible(template.get("descriptor"))
     ]
-    count = len(valid_templates)
+    count = len(registered_templates)
     if count >= 3:
         status_key = "registered"
         status_label = "Cadastrada"
@@ -176,22 +199,24 @@ def build_biometric_summary(employee: dict, templates: List[dict]) -> dict:
 
     dates = [
         ensure_aware_datetime(template.get("created_at"))
-        for template in valid_templates
+        for template in registered_templates
         if ensure_aware_datetime(template.get("created_at"))
     ]
-    quality_scores = [float(template.get("quality_score") or 0) for template in valid_templates]
+    quality_scores = [float(template.get("quality_score") or 0) for template in registered_templates]
     avg_quality = round(sum(quality_scores) / len(quality_scores), 4) if quality_scores else 0
     latest_template = sorted(
-        valid_templates,
+        registered_templates,
         key=lambda template: ensure_aware_datetime(template.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True
-    )[0] if valid_templates else None
+    )[0] if registered_templates else None
 
     return {
         "status": status_key,
         "status_label": status_label,
         "templates_count": count,
         "total_templates_count": len(templates),
+        "compatible_templates_count": len(compatible_templates),
+        "legacy_templates_count": max(count - len(compatible_templates), 0),
         "first_enrolled_at": min(dates) if dates else None,
         "last_updated_at": max(dates) if dates else None,
         "created_by": latest_template.get("created_by") if latest_template else None,
