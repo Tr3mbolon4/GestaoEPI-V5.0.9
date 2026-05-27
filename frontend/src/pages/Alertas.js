@@ -7,8 +7,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { useNavigate } from 'react-router-dom';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API } from '@/config/api';
 
 export default function Alertas() {
   const [alerts, setAlerts] = useState({ pending_epis: [], replacement_due: [] });

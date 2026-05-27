@@ -3,7 +3,7 @@
  * Centraliza a lógica de construção de URLs para garantir consistência
  */
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+import { BACKEND_URL, normalizeAbsoluteUrl } from '@/config/api';
 
 /**
  * Constrói URL correta para arquivos de upload
@@ -23,8 +23,9 @@ export const getUploadUrl = (path, bustCache = false) => {
   const cleanPath = path.trim();
   
   // Se já é URL absoluta (http/https), retorna como está
-  if (cleanPath.startsWith('http://') || cleanPath.startsWith('https://')) {
-    const url = bustCache ? `${cleanPath}${cleanPath.includes('?') ? '&' : '?'}v=${Date.now()}` : cleanPath;
+  if (cleanPath.startsWith('http:') || cleanPath.startsWith('https:')) {
+    const normalizedPath = normalizeAbsoluteUrl(cleanPath);
+    const url = bustCache ? `${normalizedPath}${normalizedPath.includes('?') ? '&' : '?'}v=${Date.now()}` : normalizedPath;
     console.debug('[getUploadUrl] URL absoluta:', url);
     return url;
   }

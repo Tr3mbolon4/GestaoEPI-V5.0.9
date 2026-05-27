@@ -11,8 +11,7 @@ import * as faceapi from 'face-api.js';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API } from '@/config/api';
 
 // Helper para construir URL correta de uploads
 const getUploadUrl = (path) => {

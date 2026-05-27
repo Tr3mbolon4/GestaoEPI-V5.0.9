@@ -457,6 +457,13 @@ class DeliveryItemInput(BaseModel):
     condition: ItemCondition = ItemCondition.NEW
     notes: Optional[str] = None
 
+    @field_validator('quantity')
+    @classmethod
+    def validate_quantity(cls, v):
+        if v < 1:
+            raise ValueError('Quantidade deve ser maior ou igual a 1')
+        return v
+
 class DeliveryCreate(BaseModel):
     employee_id: str
     delivery_type: str

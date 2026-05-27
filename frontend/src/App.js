@@ -15,6 +15,7 @@ import Fornecedores from '@/pages/Fornecedores';
 import ColaboradorDetalhes from '@/pages/ColaboradorDetalhes';
 import HistoricoEntregas from '@/pages/HistoricoEntregas';
 import Alertas from '@/pages/Alertas';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import '@/App.css';
 
 const PrivateRoute = ({ children }) => {
@@ -58,7 +59,9 @@ function App() {
     <div className="App">
       <BrowserRouter>
         <AuthProvider>
-          <AppRoutes />
+          <ErrorBoundary>
+            <AppRoutes />
+          </ErrorBoundary>
         </AuthProvider>
       </BrowserRouter>
     </div>

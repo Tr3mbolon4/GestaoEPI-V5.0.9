@@ -11,8 +11,7 @@ import { getUploadUrl, logImageError } from '@/utils/imageUtils';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API } from '@/config/api';
 
 // Threshold para verificação de duplicidade
 const DUPLICATE_THRESHOLD = 0.40;
@@ -520,6 +519,7 @@ export default function ColaboradorDetalhes() {
       
       // Já tem consentimento, salvar diretamente
       await saveFacialTemplate(imageSrc, {
+        descriptor: descriptorJson,
         poseLabel: selectedPoseLabel,
         qualityScore: detection.detection.score,
         detectionScore: detection.detection.score
@@ -549,15 +549,34 @@ export default function ColaboradorDetalhes() {
     setCaptureStatus('Salvando template...');
     
     try {
-      const response = await axios.post(
-        `${API}/facial/enroll`,
-        {
-          employee_id: id,
-          image_base64: imageSrc,
-          pose_label: metadata.poseLabel || selectedPoseLabel,
-        },
-        { headers: getAuthHeader() }
-      );
+      let response;
+      try {
+        response = await axios.post(
+          `${API}/facial/enroll`,
+          {
+            employee_id: id,
+            image_base64: imageSrc,
+            pose_label: metadata.poseLabel || selectedPoseLabel,
+          },
+          { headers: getAuthHeader() }
+        );
+      } catch (enrollError) {
+        if (!metadata.descriptor && !pendingDescriptor) {
+          throw enrollError;
+        }
+
+        console.warn('Cadastro via InsightFace falhou; salvando descriptor facial compatível.', enrollError?.response?.data || enrollError?.message);
+        response = await axios.post(
+          `${API}/employees/${id}/facial-templates`,
+          {
+            descriptor: metadata.descriptor || pendingDescriptor,
+            pose_label: metadata.poseLabel || selectedPoseLabel,
+            quality_score: metadata.qualityScore,
+            detection_score: metadata.detectionScore,
+          },
+          { headers: getAuthHeader() }
+        );
+      }
       
       if (!isMountedRef.current) return;
       
@@ -597,11 +616,14 @@ export default function ColaboradorDetalhes() {
         setWebcamActive(false);
         
         // Recarregar templates
-        setTimeout(() => fetchFacialTemplates(), 200);
+        setTimeout(async () => {
+          await fetchFacialTemplates();
+          await fetchData();
+        }, 200);
       }
     } catch (error) {
       console.error('Erro ao salvar template:', error);
-      toast.error('Erro ao salvar template facial');
+      toast.error(error.response?.data?.detail || 'Erro ao salvar template facial');
       throw error;
     }
   };
@@ -626,7 +648,7 @@ export default function ColaboradorDetalhes() {
       
       // Salvar o template que estava pendente
       if (pendingImageSrc) {
-        await saveFacialTemplate(pendingImageSrc, { poseLabel: selectedPoseLabel });
+        await saveFacialTemplate(pendingImageSrc, { descriptor: pendingDescriptor, poseLabel: selectedPoseLabel });
       }
       
       toast.success('Consentimento registrado com sucesso!');

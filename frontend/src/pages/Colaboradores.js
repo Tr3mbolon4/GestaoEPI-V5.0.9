@@ -10,8 +10,7 @@ import { Button } from '@/components/ui/button';
 import Webcam from 'react-webcam';
 import { getUploadUrl, logImageError, hasMixedContentRisk } from '@/utils/imageUtils';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API } from '@/config/api';
 
 const getBiometricStatus = (colaborador) => {
   const status = colaborador.biometric?.status || colaborador.biometric_status || 'missing';

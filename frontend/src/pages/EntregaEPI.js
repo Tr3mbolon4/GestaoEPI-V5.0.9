@@ -12,8 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Button } from '@/components/ui/button';
 import { getUploadUrl, logImageError } from '@/utils/imageUtils';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API } from '@/config/api';
 
 const LIVE_DETECTION_CONFIDENCE = 0.38;
 const FACIAL_AUTO_APPROVE_THRESHOLD = 0.80;
@@ -1084,6 +1083,7 @@ export default function EntregaEPI() {
     batch: item.variation?.batch || item.variation?.lote || '',
     qr_code: item.variation?.qr_code || '',
     ca_number: item.variation?.ca_number || item.variation?.ca || '',
+    available_stock: item.variation?.current_stock ?? item.variation?.stock ?? item.current_stock ?? 0,
     from_kit: kitName || item.kit_name || '',
     available_variations: item.available_variations || [],
     suggested_variation_id: item.suggested_variation_id || item.variation?.id || '',
@@ -1193,7 +1193,8 @@ export default function EntregaEPI() {
         size: variation?.size || variation?.tamanho || epi.size,
         batch: variation?.batch || variation?.lote || epi.batch,
         qr_code: variation?.qr_code || epi.qr_code,
-        ca_number: variation?.ca_number || variation?.ca || epi.ca_number
+        ca_number: variation?.ca_number || variation?.ca || epi.ca_number,
+        available_stock: variation?.current_stock ?? epi.current_stock ?? 0
       }]);
     }
   };
@@ -1226,9 +1227,18 @@ export default function EntregaEPI() {
         brand: variation?.brand || variation?.marca || '',
         model: variation?.model || variation?.modelo || '',
         supplier_name: variation?.supplier_name || variation?.fornecedor || '',
-        validity_date: variation?.validity_date || variation?.ca_validity || variation?.validade_ca || ''
+        validity_date: variation?.validity_date || variation?.ca_validity || variation?.validade_ca || '',
+        available_stock: variation?.current_stock ?? variation?.stock ?? item.available_stock ?? 0
       };
     }));
+  };
+
+  const updateItemQuantity = (index, value) => {
+    const parsed = parseInt(value, 10);
+    const quantity = Number.isNaN(parsed) ? 1 : Math.max(1, parsed);
+    setSelectedItems((currentItems) => currentItems.map((item, itemIndex) => (
+      itemIndex === index ? { ...item, quantity } : item
+    )));
   };
 
   // Função para mostrar termo de consentimento antes de confirmar
@@ -1246,6 +1256,21 @@ export default function EntregaEPI() {
     const missingVariation = selectedItems.find((item) => item.requires_variation_selection && !item.epi_variation_id);
     if (missingVariation) {
       toast.error(`Selecione a variacao de ${missingVariation.name} antes de concluir.`);
+      return;
+    }
+    const invalidQuantity = selectedItems.find((item) => !Number.isFinite(Number(item.quantity)) || Number(item.quantity) < 1);
+    if (invalidQuantity) {
+      toast.error(`Informe uma quantidade valida para ${invalidQuantity.name}.`);
+      return;
+    }
+    const insufficientStock = selectedItems.find((item) => (
+      deliveryType !== 'return' &&
+      item.available_stock !== undefined &&
+      item.available_stock !== null &&
+      Number(item.quantity || 1) > Number(item.available_stock)
+    ));
+    if (insufficientStock) {
+      toast.error('Estoque insuficiente para a quantidade solicitada.');
       return;
     }
     await completeDelivery();
@@ -1284,7 +1309,10 @@ export default function EntregaEPI() {
           facial_validation_message: facialMatch?.message || similarityMessage,
           facial_liveness_status: facialMatch?.livenessStatus || 'not_required',
           facial_second_capture_used: Boolean(facialMatch?.secondCaptureUsed),
-          items: selectedItems
+          items: selectedItems.map((item) => ({
+            ...item,
+            quantity: Math.max(1, parseInt(item.quantity, 10) || 1)
+          }))
         },
         { headers: getAuthHeader() }
       );
@@ -1822,9 +1850,26 @@ export default function EntregaEPI() {
                   <div className="flex-1">
                     <p className="font-medium text-slate-900">{item.name}</p>
                     <p className="text-sm text-slate-600">
-                      CA: {item.ca_number || 'N/A'} | Qtd: {item.quantity}
+                      CA: {item.ca_number || 'N/A'}
+                      {item.available_stock !== undefined && item.available_stock !== null && (
+                        <span> | Estoque: {item.available_stock}</span>
+                      )}
                       <span className={item.from_kit ? 'text-blue-600 ml-2' : 'hidden'}>(Kit: {item.from_kit})</span>
                     </p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <label className="text-xs font-medium text-slate-600" htmlFor={`delivery-item-quantity-${index}`}>
+                        Quantidade
+                      </label>
+                      <input
+                        id={`delivery-item-quantity-${index}`}
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={item.quantity || 1}
+                        onChange={(event) => updateItemQuantity(index, event.target.value)}
+                        className="h-9 w-24 rounded-md border border-slate-300 bg-white px-3 py-1 text-sm"
+                      />
+                    </div>
                     {item.requires_variation_selection && (
                       <div className="mt-2">
                         <select

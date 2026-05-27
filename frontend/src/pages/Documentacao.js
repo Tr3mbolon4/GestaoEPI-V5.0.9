@@ -9,8 +9,7 @@ import { Button } from '@/components/ui/button';
 import SignatureCanvas from 'react-signature-canvas';
 import jsPDF from 'jspdf';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API } from '@/config/api';
 
 export default function Documentacao() {
   const [templates, setTemplates] = useState([]);

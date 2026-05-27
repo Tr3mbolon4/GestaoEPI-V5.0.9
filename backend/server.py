@@ -1471,8 +1471,12 @@ async def create_facial_template(employee_id: str, template_data: FacialTemplate
         "created_by_name": current_user.get("username"),
         "created_at": datetime.now(timezone.utc)
     }
-    result = await db.facial_templates.insert_one(new_template)
-    await face_recognition_service.refresh_employee_cache(db, employee_id)
+    try:
+        result = await db.facial_templates.insert_one(new_template)
+        await face_recognition_service.refresh_employee_cache(db, employee_id)
+    except Exception as error:
+        logger.exception("Falha ao salvar template facial do colaborador %s: %s", employee_id, error)
+        raise HTTPException(status_code=500, detail='Erro ao salvar template facial')
     
     # Retornar resposta formatada corretamente
     return {
@@ -1520,12 +1524,19 @@ async def facial_enroll(
     if not face_recognition_service.available:
         raise HTTPException(status_code=503, detail='Servico facial backend indisponivel')
 
-    enroll_result = face_recognition_service.enroll_from_image(
-        payload.image_base64,
-        pose_label=payload.pose_label or 'frontal'
-    )
-    if enroll_result.get('status') != 'ok':
-        raise HTTPException(status_code=400, detail=enroll_result.get('message', 'Falha ao cadastrar biometria facial'))
+    try:
+        enroll_result = face_recognition_service.enroll_from_image(
+            payload.image_base64,
+            pose_label=payload.pose_label or 'frontal'
+        )
+        if enroll_result.get('status') != 'ok':
+            logger.warning("Falha no enroll facial do colaborador %s: %s", payload.employee_id, enroll_result.get('message'))
+            raise HTTPException(status_code=400, detail=enroll_result.get('message', 'Falha ao cadastrar biometria facial'))
+    except HTTPException:
+        raise
+    except Exception as error:
+        logger.exception("Erro ao gerar embedding facial do colaborador %s: %s", payload.employee_id, error)
+        raise HTTPException(status_code=500, detail='Erro ao processar biometria facial')
 
     descriptor_json = json.dumps(enroll_result['embedding'].tolist())
     new_template = {
@@ -1538,8 +1549,12 @@ async def facial_enroll(
         "created_by_name": current_user.get("username"),
         "created_at": datetime.now(timezone.utc)
     }
-    result = await db.facial_templates.insert_one(new_template)
-    await face_recognition_service.refresh_employee_cache(db, payload.employee_id)
+    try:
+        result = await db.facial_templates.insert_one(new_template)
+        await face_recognition_service.refresh_employee_cache(db, payload.employee_id)
+    except Exception as error:
+        logger.exception("Falha ao gravar enroll facial do colaborador %s: %s", payload.employee_id, error)
+        raise HTTPException(status_code=500, detail='Erro ao salvar template facial')
 
     return FacialEnrollResponse(
         status='ok',
@@ -2496,6 +2511,9 @@ async def create_delivery(delivery_data: DeliveryCreate, current_user: dict = De
 
     items_list = []
     for item in delivery_data.items:
+        if item.quantity < 1:
+            raise HTTPException(status_code=400, detail='Quantidade deve ser maior ou igual a 1.')
+
         item_dict = item.model_dump()
         effective_epi_id = item.epi_id
         preselected_variation = None
@@ -2529,7 +2547,7 @@ async def create_delivery(delivery_data: DeliveryCreate, current_user: dict = De
                 raise HTTPException(status_code=400, detail='Sem estoque dispon?vel para tamanho solicitado.')
 
             if not delivery_data.is_return and (variation.get('current_stock', 0) or 0) < item.quantity:
-                raise HTTPException(status_code=400, detail='Sem estoque dispon?vel para tamanho solicitado.')
+                raise HTTPException(status_code=400, detail='Estoque insuficiente para a quantidade solicitada.')
 
             stock_change = item.quantity if delivery_data.is_return else -item.quantity
             await db.epi_variations.update_one({'_id': variation['_id']}, {'$inc': {'current_stock': stock_change}})

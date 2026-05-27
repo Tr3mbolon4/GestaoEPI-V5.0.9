@@ -6,8 +6,7 @@ import axios from 'axios';
 import { getAuthHeader } from '@/contexts/AuthContext';
 import { useAuth } from '@/contexts/AuthContext';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API } from '@/config/api';
 
 export default function Dashboard() {
   const navigate = useNavigate();

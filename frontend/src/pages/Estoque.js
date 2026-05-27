@@ -6,8 +6,7 @@ import { getAuthHeader } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import { API } from '@/config/api';
 
 export default function Estoque() {
   const [alerts, setAlerts] = useState({ low_stock: [], expiring_soon: [] });
